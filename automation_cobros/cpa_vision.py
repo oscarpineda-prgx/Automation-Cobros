@@ -7,8 +7,6 @@ import re
 import time
 from typing import Any
 
-import pandas as pd
-
 import config
 from automation_cobros.utils import ensure_parent, safe_filename
 
@@ -18,6 +16,26 @@ try:
 except ImportError:  # pragma: no cover - handled at runtime with a clear message.
     PlaywrightTimeoutError = TimeoutError
     sync_playwright = None
+
+
+_CFDI_FILTER_OPTIONS = (
+    "Todos",
+    "Vigentes",
+    "Cancelados",
+    "Ingreso",
+    "Egreso",
+    "Complementos de pago",
+    "Traslado",
+)
+_RECEIVED_CFDI_FILTERS = frozenset({"Vigentes", "Ingreso"})
+_CPA_DOWNLOAD_FILE_OPTION = "Hoja de cálculo con detalle de conceptos y Tasas (.csv)"
+_CPA_DOWNLOAD_EXTRA_OPTIONS = ("Generar acumulado",)
+_BROWSER_LOCALE = "es-MX"
+_DISABLE_TRANSLATE_ARGS = (
+    "--disable-translate",
+    "--disable-features=Translate,TranslateUI",
+    f"--lang={_BROWSER_LOCALE}",
+)
 
 
 @dataclass(slots=True)
@@ -68,7 +86,7 @@ def run_manual_session(settings: CPAVisionSettings | None = None) -> list[Path]:
     attached_pages: set[int] = set()
     with sync_playwright() as playwright:
         browser = _launch_browser(playwright, settings)
-        context_kwargs: dict[str, Any] = {"accept_downloads": True}
+        context_kwargs: dict[str, Any] = {"accept_downloads": True, "locale": _BROWSER_LOCALE}
         if settings.state_path.exists():
             context_kwargs["storage_state"] = str(settings.state_path)
         context = browser.new_context(**context_kwargs)
@@ -88,6 +106,7 @@ def run_manual_session(settings: CPAVisionSettings | None = None) -> list[Path]:
         page = context.new_page()
         attach_handlers(page)
         page.goto(settings.base_url, wait_until="domcontentloaded")
+        _dismiss_transient_overlays(page)
 
         print("CPA Vision abierto.")
         print(f"Carpeta de descargas: {settings.download_dir}")
@@ -127,7 +146,7 @@ def open_downloads_page(
     with sync_playwright() as playwright:
         _log_step(f"Abriendo navegador: {settings.browser_channel or 'chromium'}")
         browser = _launch_browser(playwright, settings)
-        context_kwargs: dict[str, Any] = {"accept_downloads": True}
+        context_kwargs: dict[str, Any] = {"accept_downloads": True, "locale": _BROWSER_LOCALE}
         if settings.state_path.exists():
             _log_step(f"Reutilizando sesion guardada: {settings.state_path}")
             context_kwargs["storage_state"] = str(settings.state_path)
@@ -138,6 +157,7 @@ def open_downloads_page(
         try:
             _log_step(f"Abriendo CPA Vision: {settings.base_url}")
             page.goto(settings.base_url, wait_until="domcontentloaded")
+            _dismiss_transient_overlays(page)
             if not _is_empresa_or_downloads_page(page):
                 if not username:
                     username = input("Usuario CPA Vision: ").strip()
@@ -193,7 +213,7 @@ def request_download_and_wait(
     with sync_playwright() as playwright:
         _log_step(f"Abriendo navegador: {settings.browser_channel or 'chromium'}")
         browser = _launch_browser(playwright, settings)
-        context_kwargs: dict[str, Any] = {"accept_downloads": True}
+        context_kwargs: dict[str, Any] = {"accept_downloads": True, "locale": _BROWSER_LOCALE}
         if settings.state_path.exists():
             _log_step(f"Reutilizando sesion guardada: {settings.state_path}")
             context_kwargs["storage_state"] = str(settings.state_path)
@@ -204,6 +224,7 @@ def request_download_and_wait(
         try:
             _log_step(f"Abriendo CPA Vision: {settings.base_url}")
             page.goto(settings.base_url, wait_until="domcontentloaded")
+            _dismiss_transient_overlays(page)
             if not _is_empresa_or_downloads_page(page):
                 if not username:
                     username = input("Usuario CPA Vision: ").strip()
@@ -260,7 +281,7 @@ def wait_for_existing_request_download(
     with sync_playwright() as playwright:
         _log_step(f"Abriendo navegador: {settings.browser_channel or 'chromium'}")
         browser = _launch_browser(playwright, settings)
-        context_kwargs: dict[str, Any] = {"accept_downloads": True}
+        context_kwargs: dict[str, Any] = {"accept_downloads": True, "locale": _BROWSER_LOCALE}
         if settings.state_path.exists():
             _log_step(f"Reutilizando sesion guardada: {settings.state_path}")
             context_kwargs["storage_state"] = str(settings.state_path)
@@ -271,6 +292,7 @@ def wait_for_existing_request_download(
         try:
             _log_step(f"Abriendo CPA Vision: {settings.base_url}")
             page.goto(settings.base_url, wait_until="domcontentloaded")
+            _dismiss_transient_overlays(page)
             if not _is_empresa_or_downloads_page(page):
                 if not username:
                     username = input("Usuario CPA Vision: ").strip()
@@ -343,12 +365,14 @@ def _login(page, username: str, password: str, timeout_ms: int) -> None:
         page.get_by_text(re.compile("seleccionar empresa|descarga masiva", re.IGNORECASE)).wait_for(
             timeout=timeout_ms
         )
+    _dismiss_transient_overlays(page)
 
 
 def _launch_browser(playwright, settings: CPAVisionSettings):
     launch_kwargs: dict[str, Any] = {
         "headless": settings.headless,
         "slow_mo": settings.slow_mo_ms,
+        "args": list(_DISABLE_TRANSLATE_ARGS),
     }
     if settings.browser_channel:
         launch_kwargs["channel"] = settings.browser_channel
@@ -358,6 +382,8 @@ def _launch_browser(playwright, settings: CPAVisionSettings):
 def _open_descargas(page, timeout_ms: int) -> None:
     if re.search(r"descarga-masiva/descargas", page.url, re.IGNORECASE):
         _log_step("Ya estas en Descarga masiva")
+        _acknowledge_download_notices(page)
+        _dismiss_transient_overlays(page)
         return
 
     _log_step("Esperando empresa SORIANA")
@@ -384,81 +410,75 @@ def _open_descargas(page, timeout_ms: int) -> None:
         page.get_by_text(re.compile("descarga masiva de archivos", re.IGNORECASE)).wait_for(
             timeout=timeout_ms
         )
+    _acknowledge_download_notices(page)
+    _dismiss_transient_overlays(page)
 
 
-def _configure_default_download_options(
-    page,
-    *,
-    rfc: str | None = None,
-    years: range | None = None,
-) -> None:
-    years = years or range(2020, 2025)
-    selected_years = set(years)
+def _acknowledge_download_notices(page) -> None:
+    notices = [
+        ("Aviso Importante", re.compile(r"aviso\s+importante", re.IGNORECASE)),
+        (
+            "Disponibilidad limitada de descargas",
+            re.compile(r"disponibilidad\s+limitada(?:\s+de\s+descargas)?", re.IGNORECASE),
+        ),
+    ]
 
-    _log_step("Configurando filtros EMITIDOS")
-    _set_left_filter_options(page, section="EMITIDOS")
+    for _ in range(4):
+        clicked = False
+        for description, pattern in notices:
+            if not _is_visible_text(page, pattern, timeout_ms=1_500):
+                continue
+            _log_step(f"Aviso detectado: {description}. Dando clic en Enterado")
+            if not _click_enterado_button(page):
+                raise RuntimeError(f"Se detecto el aviso '{description}', pero no se encontro el boton Enterado.")
+            page.wait_for_timeout(500)
+            clicked = True
+            break
+        if not clicked:
+            return
 
-    _log_step("Configurando filtros RECIBIDOS")
-    _set_left_filter_options(page, section="RECIBIDOS")
 
-    _log_step("Seleccionando empresa 11810 - TIENDAS SORIANA")
-    _set_checkbox_by_text(page, "Todas", False, scope_text="EMPRESAS", max_x=650)
-    _set_checkbox_by_text(page, "11810 - TIENDAS SORIANA", True, scope_text="EMPRESAS", max_x=650)
+def _dismiss_transient_overlays(page) -> None:
+    """Close optional browser/page overlays that are not part of the audit flow."""
+    dismissed = False
+    for handler in (_dismiss_dom_translate_prompt, _dismiss_in_progress_request_dialog):
+        try:
+            dismissed = handler(page) or dismissed
+        except Exception as exc:
+            _log_step(f"No se pudo cerrar overlay opcional: {exc}")
+    if dismissed:
+        page.wait_for_timeout(300)
 
-    _log_step("Seleccionando periodos emitidos")
-    _set_period_years(page, section="EMITIDOS", selected_years=selected_years)
 
-    _log_step("Seleccionando periodos recibidos")
-    _set_period_years(page, section="RECIBIDOS", selected_years=selected_years)
-
-    if rfc:
-        _log_step("Llenando RFC en emitidos y recibidos")
-        _fill_rfc_fields(page, rfc)
-
-    _log_step("Seleccionando archivo Hoja de calculo bases y tasas (.csv)")
-    _set_checkbox_by_text(
-        page,
-        "Hoja de calculo bases y tasas (.csv)",
-        True,
-        scope_text="ARCHIVOS A DESCARGAR",
-        min_x=900,
+def _dismiss_dom_translate_prompt(page) -> bool:
+    # The Edge/Chrome translation bubble is browser UI and is disabled at launch.
+    # This fallback handles any equivalent in-page prompt if the site injects one.
+    patterns = (
+        re.compile(r"^\s*not\s+now\s*$", re.IGNORECASE),
+        re.compile(r"^\s*ahora\s+no\s*$", re.IGNORECASE),
     )
-    _set_checkbox_by_text(
-        page,
-        "Generar acumulado",
-        True,
-        scope_text="ARCHIVOS A DESCARGAR",
-        min_x=900,
-    )
+    for pattern in patterns:
+        locators = [
+            lambda pattern=pattern: page.get_by_role("button", name=pattern),
+            lambda pattern=pattern: page.locator("button").filter(has_text=pattern),
+            lambda pattern=pattern: page.get_by_text(pattern),
+        ]
+        for factory in locators:
+            try:
+                locator = factory().first
+                locator.wait_for(state="visible", timeout=800)
+                locator.click(timeout=800)
+                _log_step("Cuadro de traduccion cerrado: Not now")
+                return True
+            except Exception:
+                continue
+    return False
 
 
-def _set_left_filter_options(page, *, section: str) -> None:
-    _set_checkbox_by_text(page, "Todos", False, scope_text=section, max_x=500)
-    _set_checkbox_by_text(page, "Vigentes", True, scope_text=section, max_x=500)
-    _set_checkbox_by_text(page, "Cancelados", False, scope_text=section, max_x=500)
-    _set_checkbox_by_text(page, "Ingreso", True, scope_text=section, max_x=500)
-    _set_checkbox_by_text(page, "Egreso", False, scope_text=section, max_x=500)
-    _set_checkbox_by_text(page, "Complementos de pago", False, scope_text=section, max_x=500)
-    _set_checkbox_by_text(page, "Traslado", False, scope_text=section, max_x=500)
-
-
-def _set_period_years(page, *, section: str, selected_years: set[int]) -> None:
-    for year in range(2014, 2027):
-        _set_checkbox_by_text(
-            page,
-            str(year),
-            year in selected_years,
-            scope_text=section,
-            min_x=250,
-            exact=True,
-            required=False,
-        )
-
-
-def _fill_rfc_fields(page, rfc: str) -> None:
+def _dismiss_in_progress_request_dialog(page) -> bool:
     result = page.evaluate(
         """
-        ({ rfc }) => {
+        () => {
             const normalize = (value) => String(value || "")
                 .normalize("NFD")
                 .replace(/[\\u0300-\\u036f]/g, "")
@@ -475,10 +495,467 @@ def _fill_rfc_fields(page, rfc: str) -> None:
             };
 
             const textOf = (el) => normalize(el.innerText || el.textContent || "");
+            const elements = Array.from(document.body.querySelectorAll("*"))
+                .filter(isVisible)
+                .map((el) => ({ el, rect: el.getBoundingClientRect(), text: textOf(el) }))
+                .filter((item) => item.text);
+
+            const title = elements
+                .filter((item) => item.text.includes("solicitud en proceso") && item.text.length <= 80)
+                .sort((a, b) => a.rect.top - b.rect.top)[0];
+            if (!title) {
+                return { found: false, closed: false };
+            }
+
+            let container = title.el;
+            for (let i = 0; i < 8 && container.parentElement; i += 1) {
+                const parent = container.parentElement;
+                const rect = parent.getBoundingClientRect();
+                const parentText = textOf(parent);
+                const area = rect.width * rect.height;
+                const viewportArea = window.innerWidth * window.innerHeight;
+                if (
+                    rect.width >= 300
+                    && rect.height >= 80
+                    && rect.width <= window.innerWidth * 0.98
+                    && rect.height <= window.innerHeight * 0.85
+                    && area <= viewportArea * 0.75
+                    && parentText.includes("solicitud en proceso")
+                    && parentText.includes("esta siendo procesada")
+                ) {
+                    container = parent;
+                }
+            }
+
+            const containerRect = container.getBoundingClientRect();
+            const closeTerms = /(cerrar|close|dismiss|arrow|flecha|chevron|angle|right|up|times|remove|cancel|x)/i;
+            const candidates = Array.from(container.querySelectorAll("button, a, [role='button'], i, span, div"))
+                .filter(isVisible)
+                .map((el) => {
+                    const rect = el.getBoundingClientRect();
+                    const attrs = [
+                        el.innerText,
+                        el.textContent,
+                        el.getAttribute("aria-label"),
+                        el.getAttribute("title"),
+                        el.getAttribute("class"),
+                        el.id,
+                    ].join(" ");
+                    const nearTopRight = rect.top <= containerRect.top + 80
+                        && rect.right >= containerRect.right - 120;
+                    const keyword = closeTerms.test(attrs);
+                    const hasPointer = window.getComputedStyle(el).cursor === "pointer";
+                    return {
+                        el,
+                        nearTopRight,
+                        keyword,
+                        hasPointer,
+                        score: (nearTopRight ? 0 : 1000)
+                            + (keyword ? 0 : 200)
+                            + (hasPointer ? 0 : 50)
+                            + Math.abs(rect.right - containerRect.right)
+                            + Math.abs(rect.top - containerRect.top),
+                    };
+                })
+                .filter((item) => item.nearTopRight && (item.keyword || item.hasPointer))
+                .sort((a, b) => a.score - b.score);
+
+            if (candidates[0]) {
+                candidates[0].el.click();
+                return { found: true, closed: true, method: "candidate" };
+            }
+
+            const fallbackX = containerRect.right - 24;
+            const fallbackY = containerRect.top + 24;
+            const fallback = document.elementFromPoint(fallbackX, fallbackY);
+            if (fallback && container.contains(fallback) && fallback !== container) {
+                fallback.click();
+                return { found: true, closed: true, method: "top-right" };
+            }
+
+            return { found: true, closed: false };
+        }
+        """
+    )
+    if result.get("closed"):
+        _log_step("Cuadro 'Solicitud en proceso' cerrado")
+        return True
+    if result.get("found"):
+        _log_step("Cuadro 'Solicitud en proceso' detectado, pero no se pudo cerrar automaticamente")
+    return False
+
+
+def _is_visible_text(page, pattern: re.Pattern[str], *, timeout_ms: int) -> bool:
+    try:
+        page.get_by_text(pattern).first.wait_for(state="visible", timeout=timeout_ms)
+        return True
+    except Exception:
+        return False
+
+
+def _click_enterado_button(page) -> bool:
+    enterado = re.compile(r"^\s*enterado\s*$", re.IGNORECASE)
+    locators = [
+        lambda: page.get_by_role("button", name=enterado),
+        lambda: page.locator("button").filter(has_text=enterado),
+        lambda: page.get_by_text(enterado),
+    ]
+    for factory in locators:
+        try:
+            locator = factory().first
+            locator.wait_for(state="visible", timeout=1_500)
+            locator.click(timeout=1_500)
+            return True
+        except Exception:
+            continue
+    return bool(
+        page.evaluate(
+            """
+            () => {
+                const normalize = (value) => String(value || "")
+                    .normalize("NFD")
+                    .replace(/[\\u0300-\\u036f]/g, "")
+                    .replace(/\\s+/g, " ")
+                    .trim()
+                    .toLowerCase();
+
+                const isVisible = (el) => {
+                    if (!el) return false;
+                    const style = window.getComputedStyle(el);
+                    if (style.visibility === "hidden" || style.display === "none") return false;
+                    const rect = el.getBoundingClientRect();
+                    return rect.width > 0 && rect.height > 0;
+                };
+
+                const candidates = Array.from(document.querySelectorAll("button, a, input, div, span"))
+                    .filter(isVisible)
+                    .filter((el) => normalize(el.innerText || el.value || el.textContent) === "enterado");
+                const preferred = candidates.find((el) => ["BUTTON", "A", "INPUT"].includes(el.tagName))
+                    || candidates[0];
+                if (!preferred) return false;
+                preferred.click();
+                return true;
+            }
+            """
+        )
+    )
+
+
+def _configure_default_download_options(
+    page,
+    *,
+    rfc: str | None = None,
+    years: range | None = None,
+) -> None:
+    years = years or range(2020, 2025)
+    selected_years = set(years)
+
+    _log_step("Limpiando filtros EMITIDOS")
+    _set_left_filter_options(page, section="EMITIDOS", enabled_options=frozenset())
+
+    _log_step("Configurando filtros RECIBIDOS")
+    _set_left_filter_options(page, section="RECIBIDOS", enabled_options=_RECEIVED_CFDI_FILTERS)
+
+    _log_step("Seleccionando empresa 11810 - TIENDAS SORIANA")
+    _set_checkbox_by_text(page, "Todas", False, scope_text="EMPRESAS", max_x=650)
+    _set_checkbox_by_text(page, "11810 - TIENDAS SORIANA", True, scope_text="EMPRESAS", max_x=650)
+
+    _log_step("Limpiando periodos emitidos")
+    _set_period_years(page, section="EMITIDOS", selected_years=set())
+
+    _log_step("Seleccionando periodos recibidos")
+    _set_period_years(page, section="RECIBIDOS", selected_years=selected_years)
+
+    _log_step("Limpiando RFC en emitidos")
+    _clear_rfc_fields(page, section="EMITIDOS")
+
+    if rfc:
+        _log_step("Llenando RFC en recibidos")
+        _fill_rfc_fields(page, rfc, section="RECIBIDOS")
+
+    _log_step(f"Seleccionando archivo {_CPA_DOWNLOAD_FILE_OPTION}")
+    _select_only_download_file_options(page, (_CPA_DOWNLOAD_FILE_OPTION, *_CPA_DOWNLOAD_EXTRA_OPTIONS))
+
+
+def _set_left_filter_options(page, *, section: str, enabled_options: frozenset[str]) -> None:
+    for option in _CFDI_FILTER_OPTIONS:
+        _set_checkbox_by_text(
+            page,
+            option,
+            option in enabled_options,
+            scope_text=section,
+            max_x=500,
+        )
+
+
+def _set_period_years(page, *, section: str, selected_years: set[int]) -> None:
+    for year in range(2014, 2027):
+        _set_checkbox_by_text(
+            page,
+            str(year),
+            year in selected_years,
+            scope_text=section,
+            min_x=250,
+            exact=True,
+            required=False,
+        )
+
+
+def _select_only_download_file_options(page, option_texts: tuple[str, ...]) -> None:
+    # The site keeps all file options in a custom checkbox list, so clear the
+    # visible download block first and then mark the current requirements.
+    result = page.evaluate(
+        """
+        ({ optionTexts }) => {
+            const normalize = (value) => String(value || "")
+                .normalize("NFD")
+                .replace(/[\\u0300-\\u036f]/g, "")
+                .replace(/\\s+/g, " ")
+                .trim()
+                .toLowerCase();
+
+            const wanted = optionTexts.map(normalize);
+
+            const isVisible = (el) => {
+                if (!el) return false;
+                const style = window.getComputedStyle(el);
+                if (style.visibility === "hidden" || style.display === "none") return false;
+                const rect = el.getBoundingClientRect();
+                return rect.width > 0 && rect.height > 0;
+            };
+
+            const textOf = (el) => normalize(el.innerText || el.textContent || "");
+            const elements = Array.from(document.body.querySelectorAll("*"))
+                .filter(isVisible)
+                .map((el) => ({ el, rect: el.getBoundingClientRect(), text: textOf(el) }))
+                .filter((item) => item.text);
+
+            const header = elements
+                .filter((item) => item.text.includes("archivos a descargar"))
+                .sort((a, b) => b.rect.left - a.rect.left)[0];
+            if (!header) {
+                return { ok: false, message: "No se encontro la seccion ARCHIVOS A DESCARGAR." };
+            }
+
+            const nextHeader = elements
+                .filter((item) => item.rect.top > header.rect.bottom + 5)
+                .filter((item) => ["columnas", "notificacion", "alias"].some((text) => item.text.includes(text)))
+                .sort((a, b) => a.rect.top - b.rect.top)[0];
+
+            const sectionTop = header.rect.bottom;
+            const sectionBottom = nextHeader ? nextHeader.rect.top : sectionTop + 650;
+            const sectionLeft = Math.max(header.rect.left - 20, 850);
+
+            const labelText = (input) => {
+                const parts = [];
+                if (input.id) {
+                    const label = document.querySelector(`label[for="${CSS.escape(input.id)}"]`);
+                    if (label) parts.push(textOf(label));
+                }
+                const wrappingLabel = input.closest("label");
+                if (wrappingLabel) parts.push(textOf(wrappingLabel));
+
+                const rect = input.getBoundingClientRect();
+                const centerY = rect.top + rect.height / 2;
+                for (const item of elements) {
+                    const itemCenterY = item.rect.top + item.rect.height / 2;
+                    const vertical = Math.abs(itemCenterY - centerY);
+                    const isNearRight = item.rect.left >= rect.left - 8 && item.rect.left <= rect.left + 520;
+                    if (vertical <= 24 && isNearRight && item.text.length <= 260) {
+                        parts.push(item.text);
+                    }
+                }
+                return parts.join(" ");
+            };
+
+            const checkboxes = Array.from(document.querySelectorAll("input[type='checkbox']"))
+                .filter((input) => !input.disabled && isVisible(input))
+                .filter((input) => {
+                    const rect = input.getBoundingClientRect();
+                    return rect.left >= sectionLeft && rect.top > sectionTop && rect.top < sectionBottom;
+                });
+
+            let found = false;
+            let cleared = 0;
+            for (const input of checkboxes) {
+                const label = labelText(input);
+                const isWanted = wanted.some((text) => label.includes(text));
+                found = found || isWanted;
+                if (!isWanted && input.checked) {
+                    input.scrollIntoView({ block: "center", inline: "center" });
+                    input.click();
+                    cleared += 1;
+                }
+            }
+
+            return { ok: true, found, cleared };
+        }
+        """,
+        {"optionTexts": list(option_texts)},
+    )
+    if not result.get("ok"):
+        raise RuntimeError(result.get("message") or "No se encontro la seccion ARCHIVOS A DESCARGAR.")
+    if result.get("cleared"):
+        _log_step(f"Opciones anteriores de archivos desmarcadas: {result['cleared']}")
+
+    for option_text in option_texts:
+        _set_checkbox_by_text(
+            page,
+            option_text,
+            True,
+            scope_text="ARCHIVOS A DESCARGAR",
+            min_x=900,
+        )
+
+
+def _clear_rfc_fields(page, *, section: str) -> None:
+    direct_selector = "#cxp-rfcs" if section.strip().upper() == "RECIBIDOS" else "#cxc-rfcs"
+    try:
+        field = page.locator(direct_selector).first
+        field.wait_for(state="visible", timeout=2_000)
+        field.fill("")
+        field.evaluate("""(input) => input.dispatchEvent(new Event("change", { bubbles: true }))""")
+        _log_step(f"RFC limpiado en {section.lower()} ({direct_selector})")
+        return
+    except Exception:
+        pass
+
+    result = page.evaluate(
+        """
+        ({ section }) => {
+            const normalize = (value) => String(value || "")
+                .normalize("NFD")
+                .replace(/[\\u0300-\\u036f]/g, "")
+                .replace(/\\s+/g, " ")
+                .trim()
+                .toLowerCase();
+
+            const wantedSection = normalize(section);
+
+            const isVisible = (el) => {
+                if (!el) return false;
+                const style = window.getComputedStyle(el);
+                if (style.visibility === "hidden" || style.display === "none") return false;
+                const rect = el.getBoundingClientRect();
+                return rect.width > 0 && rect.height > 0;
+            };
+
+            const textOf = (el) => normalize(el.innerText || el.textContent || "");
             const textElements = Array.from(document.body.querySelectorAll("*"))
                 .filter(isVisible)
                 .map((el) => ({ el, rect: el.getBoundingClientRect(), text: textOf(el) }))
                 .filter((item) => item.text && item.text.length <= 120);
+
+            const sectionScore = (input) => {
+                if (!wantedSection) return 0;
+                const rect = input.getBoundingClientRect();
+                let bestDistance = null;
+                for (const item of textElements) {
+                    if (!item.text.includes(wantedSection)) continue;
+                    if (item.rect.left < 600) continue;
+                    if (item.rect.top > rect.top + 5) continue;
+                    const horizontalGap = Math.max(item.rect.left - rect.right, rect.left - item.rect.right, 0);
+                    if (horizontalGap > 700) continue;
+                    const verticalGap = rect.top - item.rect.top;
+                    if (verticalGap > 500) continue;
+                    const distance = verticalGap + horizontalGap / 4;
+                    if (bestDistance === null || distance < bestDistance) {
+                        bestDistance = distance;
+                    }
+                }
+                return bestDistance;
+            };
+
+            const inputs = Array.from(document.querySelectorAll("input"))
+                .filter((input) => !input.disabled && isVisible(input))
+                .filter((input) => {
+                    const type = normalize(input.getAttribute("type") || "text");
+                    return ["", "text", "search"].includes(type);
+                });
+
+            let cleared = 0;
+            for (const input of inputs) {
+                const attrs = normalize([
+                    input.name,
+                    input.id,
+                    input.getAttribute("aria-label"),
+                    input.getAttribute("placeholder"),
+                ].join(" "));
+                if (!attrs.includes("rfc")) continue;
+                const scope = sectionScore(input);
+                if (wantedSection && scope === null) continue;
+                input.scrollIntoView({ block: "center", inline: "center" });
+                input.focus();
+                input.value = "";
+                input.dispatchEvent(new Event("input", { bubbles: true }));
+                input.dispatchEvent(new Event("change", { bubbles: true }));
+                cleared += 1;
+            }
+            return cleared;
+        }
+        """,
+        {"section": section},
+    )
+    _log_step(f"RFC limpiado en {result} casilla(s) de {section.lower()}")
+
+
+def _fill_rfc_fields(page, rfc: str, *, section: str = "RECIBIDOS") -> None:
+    direct_selector = "#cxp-rfcs" if section.strip().upper() == "RECIBIDOS" else "#cxc-rfcs"
+    try:
+        field = page.locator(direct_selector).first
+        field.wait_for(state="visible", timeout=5_000)
+        field.fill(rfc)
+        field.evaluate("""(input) => input.dispatchEvent(new Event("change", { bubbles: true }))""")
+        _log_step(f"RFC capturado en {section.lower()} ({direct_selector})")
+        return
+    except Exception:
+        pass
+
+    result = page.evaluate(
+        """
+        ({ rfc, section }) => {
+            const normalize = (value) => String(value || "")
+                .normalize("NFD")
+                .replace(/[\\u0300-\\u036f]/g, "")
+                .replace(/\\s+/g, " ")
+                .trim()
+                .toLowerCase();
+
+            const wantedSection = normalize(section);
+
+            const isVisible = (el) => {
+                if (!el) return false;
+                const style = window.getComputedStyle(el);
+                if (style.visibility === "hidden" || style.display === "none") return false;
+                const rect = el.getBoundingClientRect();
+                return rect.width > 0 && rect.height > 0;
+            };
+
+            const textOf = (el) => normalize(el.innerText || el.textContent || "");
+            const textElements = Array.from(document.body.querySelectorAll("*"))
+                .filter(isVisible)
+                .map((el) => ({ el, rect: el.getBoundingClientRect(), text: textOf(el) }))
+                .filter((item) => item.text && item.text.length <= 120);
+
+            const sectionScore = (input) => {
+                if (!wantedSection) return 0;
+                const rect = input.getBoundingClientRect();
+                let bestDistance = null;
+                for (const item of textElements) {
+                    if (!item.text.includes(wantedSection)) continue;
+                    if (item.rect.left < 600) continue;
+                    if (item.rect.top > rect.top + 5) continue;
+                    const horizontalGap = Math.max(item.rect.left - rect.right, rect.left - item.rect.right, 0);
+                    if (horizontalGap > 700) continue;
+                    const verticalGap = rect.top - item.rect.top;
+                    if (verticalGap > 500) continue;
+                    const distance = verticalGap + horizontalGap / 4;
+                    if (bestDistance === null || distance < bestDistance) {
+                        bestDistance = distance;
+                    }
+                }
+                return bestDistance;
+            };
 
             const inputs = Array.from(document.querySelectorAll("input"))
                 .filter((input) => !input.disabled && isVisible(input))
@@ -508,10 +985,14 @@ def _fill_rfc_fields(page, rfc: str) -> None:
                         }
                     }
                 }
-                if (isRfc) matches.push(input);
+                if (!isRfc) continue;
+                const scope = sectionScore(input);
+                if (wantedSection && scope === null) continue;
+                matches.push({ input, score: scope || 0 });
             }
 
-            for (const input of matches) {
+            matches.sort((a, b) => a.score - b.score);
+            for (const { input } of matches) {
                 input.scrollIntoView({ block: "center", inline: "center" });
                 input.focus();
                 input.value = rfc;
@@ -521,11 +1002,11 @@ def _fill_rfc_fields(page, rfc: str) -> None:
             return matches.length;
         }
         """,
-        {"rfc": rfc},
+        {"rfc": rfc, "section": section},
     )
-    if result < 2:
-        raise RuntimeError(f"No se llenaron las dos casillas RFC. Casillas encontradas: {result}.")
-    _log_step(f"RFC capturado en {result} casillas")
+    if result < 1:
+        raise RuntimeError(f"No se lleno la casilla RFC de {section}. Casillas encontradas: {result}.")
+    _log_step(f"RFC capturado en {result} casilla(s) de {section.lower()}")
 
 
 def _submit_download_request(page, timeout_ms: int) -> str:
@@ -561,16 +1042,27 @@ def _submit_download_request(page, timeout_ms: int) -> str:
 
 def _set_request_reason_and_frequency(page) -> None:
     _log_step("Seleccionando Motivo: Conciliacion")
-    _set_checkbox_by_text(page, "Requerimiento", False, scope_text="Motivo")
-    _set_checkbox_by_text(page, "Conciliacion", True, scope_text="Motivo")
-    _set_checkbox_by_text(page, "Base de datos", False, scope_text="Motivo")
-    _set_checkbox_by_text(page, "Dashboard", False, scope_text="Motivo")
-    _set_checkbox_by_text(page, "Reportes Internos", False, scope_text="Motivo")
-    _assert_choice_checked(page, "checkbox", "Conciliacion", "Motivo")
+    _set_input_checked_by_selector(page, "#requerimiento", False, "Motivo Requerimiento")
+    _set_input_checked_by_selector(page, "#conciliacion", True, "Motivo Conciliacion")
+    _set_input_checked_by_selector(page, "#baseDeDatos", False, "Motivo Base de datos")
+    _set_input_checked_by_selector(page, "#dashboard", False, "Motivo Dashboard")
+    _set_input_checked_by_selector(page, "#reportesInternos", False, "Motivo Reportes internos")
 
     _log_step("Seleccionando Frecuencia: Unica vez")
-    _set_radio_by_text(page, "Unica vez", True, scope_text="Frecuencia")
-    _assert_choice_checked(page, "radio", "Unica vez", "Frecuencia")
+    _set_input_checked_by_selector(page, "#unicaVez", True, "Frecuencia Unica vez")
+
+
+def _set_input_checked_by_selector(page, selector: str, checked: bool, description: str) -> None:
+    locator = page.locator(selector).first
+    locator.wait_for(state="visible", timeout=5_000)
+    if checked:
+        locator.check(force=True, timeout=5_000)
+    elif locator.is_checked():
+        locator.uncheck(force=True, timeout=5_000)
+    page.wait_for_timeout(150)
+    if locator.is_checked() != checked:
+        raise RuntimeError(f"La opcion no quedo en el estado requerido: {description}.")
+    _log_step(f"Verificado: {description}")
 
 
 def _wait_for_request_confirmation(page, timeout_ms: int) -> None:
@@ -610,6 +1102,7 @@ def _wait_for_request_zip(
         _log_step(f"Validando solicitud {request_id}. Intento {attempt}")
         page.reload(wait_until="domcontentloaded")
         page.wait_for_timeout(1_000)
+        _dismiss_transient_overlays(page)
         row = _find_request_row(page, request_id, timeout_ms=30_000)
         if row is None:
             if time.monotonic() >= deadline:
@@ -700,6 +1193,7 @@ def _open_solicitudes(page) -> None:
         page.get_by_text(re.compile("estatus de descargas", re.IGNORECASE)).wait_for(timeout=20_000)
     except Exception:
         page.locator("table").first.wait_for(timeout=20_000)
+    _dismiss_transient_overlays(page)
 
 
 def _first_ready_request_link(row):
@@ -903,243 +1397,6 @@ def _set_checkbox_by_text(
     return bool(result.get("ok"))
 
 
-def _set_radio_by_text(
-    page,
-    text: str,
-    checked: bool,
-    *,
-    scope_text: str | None = None,
-    required: bool = True,
-) -> bool:
-    return _set_choice_by_text(
-        page,
-        "radio",
-        text,
-        checked,
-        scope_text=scope_text,
-        required=required,
-    )
-
-
-def _assert_choice_checked(page, input_type: str, text: str, scope_text: str | None = None) -> None:
-    result = page.evaluate(
-        """
-        ({ inputType, text, scopeText }) => {
-            const normalize = (value) => String(value || "")
-                .normalize("NFD")
-                .replace(/[\\u0300-\\u036f]/g, "")
-                .replace(/\\s+/g, " ")
-                .trim()
-                .toLowerCase();
-
-            const wanted = normalize(text);
-            const wantedScope = scopeText ? normalize(scopeText) : "";
-
-            const isVisible = (el) => {
-                if (!el) return false;
-                const style = window.getComputedStyle(el);
-                if (style.visibility === "hidden" || style.display === "none") return false;
-                const rect = el.getBoundingClientRect();
-                return rect.width > 0 && rect.height > 0;
-            };
-
-            const textOf = (el) => normalize(el.innerText || el.textContent || "");
-            const textElements = Array.from(document.body.querySelectorAll("*"))
-                .filter(isVisible)
-                .map((el) => ({ el, rect: el.getBoundingClientRect(), text: textOf(el) }))
-                .filter((item) => item.text && item.text.length <= 220);
-
-            const labelText = (input) => {
-                const parts = [];
-                if (input.id) {
-                    const label = document.querySelector(`label[for="${CSS.escape(input.id)}"]`);
-                    if (label) parts.push(textOf(label));
-                }
-                const wrappingLabel = input.closest("label");
-                if (wrappingLabel) parts.push(textOf(wrappingLabel));
-                return parts.join(" ");
-            };
-
-            const hasNearbyLabel = (input) => {
-                const associated = labelText(input);
-                if (associated && associated.includes(wanted)) return true;
-                const rect = input.getBoundingClientRect();
-                const centerY = rect.top + rect.height / 2;
-                for (const item of textElements) {
-                    if (!item.text.includes(wanted)) continue;
-                    const itemCenterY = item.rect.top + item.rect.height / 2;
-                    const vertical = Math.abs(itemCenterY - centerY);
-                    const isNearRight = item.rect.left >= rect.left - 8 && item.rect.left <= rect.left + 340;
-                    const isNearLeft = item.rect.right >= rect.left - 80 && item.rect.right <= rect.right + 12;
-                    if (vertical <= 24 && (isNearRight || isNearLeft)) return true;
-                }
-                return false;
-            };
-
-            const inScope = (input) => {
-                if (!wantedScope) return true;
-                const rect = input.getBoundingClientRect();
-                return textElements.some((item) => {
-                    if (!item.text.includes(wantedScope)) return false;
-                    if (item.rect.top > rect.top + 5) return false;
-                    const horizontalGap = Math.max(item.rect.left - rect.right, rect.left - item.rect.right, 0);
-                    return horizontalGap <= 650 && (rect.top - item.rect.top) <= 260;
-                });
-            };
-
-            const inputs = Array.from(document.querySelectorAll(`input[type='${inputType}']`))
-                .filter((input) => !input.disabled && isVisible(input));
-            const selected = inputs.find((input) => hasNearbyLabel(input) && inScope(input));
-            return {
-                found: Boolean(selected),
-                checked: Boolean(selected && selected.checked),
-            };
-        }
-        """,
-        {"inputType": input_type, "text": text, "scopeText": scope_text},
-    )
-    if not result.get("found"):
-        raise RuntimeError(f"No se encontro la opcion para verificar: {scope_text or ''} {text}".strip())
-    if not result.get("checked"):
-        raise RuntimeError(f"La opcion no quedo seleccionada: {scope_text or ''} {text}".strip())
-    _log_step(f"Verificado: {scope_text or ''} {text}".strip())
-
-
-def _set_choice_by_text(
-    page,
-    input_type: str,
-    text: str,
-    checked: bool,
-    *,
-    scope_text: str | None = None,
-    required: bool = True,
-) -> bool:
-    result = page.evaluate(
-        """
-        ({ inputType, text, checked, scopeText }) => {
-            const normalize = (value) => String(value || "")
-                .normalize("NFD")
-                .replace(/[\\u0300-\\u036f]/g, "")
-                .replace(/\\s+/g, " ")
-                .trim()
-                .toLowerCase();
-
-            const wanted = normalize(text);
-            const wantedScope = scopeText ? normalize(scopeText) : "";
-
-            const isVisible = (el) => {
-                if (!el) return false;
-                const style = window.getComputedStyle(el);
-                if (style.visibility === "hidden" || style.display === "none") return false;
-                const rect = el.getBoundingClientRect();
-                return rect.width > 0 && rect.height > 0;
-            };
-
-            const textOf = (el) => normalize(el.innerText || el.textContent || "");
-            const textElements = Array.from(document.body.querySelectorAll("*"))
-                .filter(isVisible)
-                .map((el) => ({ el, rect: el.getBoundingClientRect(), text: textOf(el) }))
-                .filter((item) => item.text && item.text.length <= 220);
-
-            const labelText = (input) => {
-                const parts = [];
-                if (input.id) {
-                    const label = document.querySelector(`label[for="${CSS.escape(input.id)}"]`);
-                    if (label) parts.push(textOf(label));
-                }
-                const wrappingLabel = input.closest("label");
-                if (wrappingLabel) parts.push(textOf(wrappingLabel));
-                return parts.join(" ");
-            };
-
-            const nearbyTargetScore = (input) => {
-                const rect = input.getBoundingClientRect();
-                const centerY = rect.top + rect.height / 2;
-                const centerX = rect.left + rect.width / 2;
-                let best = null;
-
-                const associated = labelText(input);
-                if (associated && associated.includes(wanted)) {
-                    best = { distance: 0, source: associated };
-                }
-
-                for (const item of textElements) {
-                    if (!item.text.includes(wanted)) continue;
-                    const itemCenterY = item.rect.top + item.rect.height / 2;
-                    const vertical = Math.abs(itemCenterY - centerY);
-                    const horizontal = Math.abs(item.rect.left - centerX);
-                    const isSameRow = vertical <= 24;
-                    const isNearRight = item.rect.left >= rect.left - 8 && item.rect.left <= rect.left + 320;
-                    const isNearLeft = item.rect.right >= rect.left - 80 && item.rect.right <= rect.right + 12;
-                    if (!isSameRow || (!isNearRight && !isNearLeft)) continue;
-                    const distance = vertical + horizontal / 25;
-                    if (!best || distance < best.distance) {
-                        best = { distance, source: item.text };
-                    }
-                }
-                return best;
-            };
-
-            const scopeScore = (input) => {
-                if (!wantedScope) return 0;
-                const rect = input.getBoundingClientRect();
-                let bestDistance = null;
-                for (const item of textElements) {
-                    if (!item.text.includes(wantedScope)) continue;
-                    if (item.rect.top > rect.top + 5) continue;
-                    const horizontalGap = Math.max(item.rect.left - rect.right, rect.left - item.rect.right, 0);
-                    if (horizontalGap > 650) continue;
-                    const distance = (rect.top - item.rect.top) + horizontalGap / 4;
-                    if (bestDistance === null || distance < bestDistance) {
-                        bestDistance = distance;
-                    }
-                }
-                return bestDistance;
-            };
-
-            const inputs = Array.from(document.querySelectorAll(`input[type='${inputType}']`))
-                .filter((input) => !input.disabled && isVisible(input));
-
-            const candidates = [];
-            for (const input of inputs) {
-                const target = nearbyTargetScore(input);
-                if (!target) continue;
-                const scope = scopeScore(input);
-                if (wantedScope && scope === null) continue;
-                candidates.push({ input, score: target.distance + (scope || 0) / 100 });
-            }
-
-            candidates.sort((a, b) => a.score - b.score);
-            const selected = candidates[0];
-            if (!selected) {
-                return { ok: false, changed: false, message: `No se encontro opcion: ${text}` };
-            }
-
-            selected.input.scrollIntoView({ block: "center", inline: "center" });
-            if (selected.input.checked !== checked) {
-                selected.input.click();
-                return { ok: true, changed: true, checked: selected.input.checked };
-            }
-            return { ok: true, changed: false, checked: selected.input.checked };
-        }
-        """,
-        {
-            "inputType": input_type,
-            "text": text,
-            "checked": checked,
-            "scopeText": scope_text,
-        },
-    )
-    if not result.get("ok") and required:
-        raise RuntimeError(result.get("message") or f"No se encontro opcion: {text}")
-    if result.get("ok"):
-        _log_step(f"Opcion actualizada: {text}")
-        page.wait_for_timeout(150)
-    elif not required:
-        _log_step(f"Omitido: {result.get('message', text)}")
-    return bool(result.get("ok"))
-
-
 def _select_facreview_if_present(page) -> None:
     selects = page.locator("select")
     if selects.count() == 0:
@@ -1200,16 +1457,6 @@ def list_downloaded_csvs(download_dir: Path | str | None = None) -> list[Path]:
     if not folder.exists():
         return []
     return sorted(folder.glob("*.csv"), key=lambda item: item.stat().st_mtime, reverse=True)
-
-
-def read_downloaded_csv(path: Path | str) -> pd.DataFrame:
-    csv_path = Path(path)
-    for encoding in ("utf-8-sig", "latin1"):
-        try:
-            return pd.read_csv(csv_path, sep=None, engine="python", encoding=encoding)
-        except UnicodeDecodeError:
-            continue
-    return pd.read_csv(csv_path, sep=None, engine="python")
 
 
 def _save_download(download, download_dir: Path, downloaded_files: list[Path]) -> None:

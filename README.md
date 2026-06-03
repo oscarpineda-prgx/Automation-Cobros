@@ -81,9 +81,10 @@ $env:CPA_VISION_PASSWORD = "password"
 python main.py cpa-downloads-page --download-dir outputs\cpa_vision --browser-channel msedge
 ```
 
-La seleccion base marca `RECIBIDOS`, `Vigentes`, `Ingreso`,
-`11810 - TIENDAS SORIANA`, anos `2020` a `2024` y
-`Hoja de calculo bases y tasas (.csv)`.
+La seleccion base deja `EMITIDOS` vacio y marca solo `RECIBIDOS`,
+`Vigentes`, `Ingreso`, `11810 - TIENDAS SORIANA`, anos `2020` a `2024` y
+`Hoja de cálculo con detalle de conceptos y Tasas (.csv)`.
+Tambien marca `Generar acumulado`.
 
 Para solicitar la descarga, esperar la solicitud y descargar el ZIP:
 
@@ -93,8 +94,10 @@ $env:CPA_VISION_PASSWORD = "password"
 python main.py cpa-request-download --rfc "RFC_DEL_PROVEEDOR" --download-dir outputs\cpa_vision --browser-channel msedge
 ```
 
-Este flujo marca emitidos y recibidos con `Vigentes`, `Ingreso`, anos `2020`
-a `2024`, captura el RFC en ambas secciones, marca `Generar acumulado`,
+Este flujo deja `EMITIDOS` vacio, marca solo recibidos con `Vigentes`,
+`Ingreso`, anos `2020` a `2024`, captura el RFC en la seccion `RECIBIDOS`,
+selecciona `Hoja de cálculo con detalle de conceptos y Tasas (.csv)`,
+marca `Generar acumulado`,
 envia la solicitud, selecciona `Conciliacion` y `Unica vez`, abre
 `Solicitudes`, refresca cada 20 segundos y descarga el ZIP cuando el link
 este disponible.

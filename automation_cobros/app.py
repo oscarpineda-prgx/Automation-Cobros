@@ -15,6 +15,7 @@ from automation_cobros.validation_exporter import write_validation_workbook
 
 
 class CobrosApp:
+    #Definición de la clase CobrosApp, se encarga de construir la interfaz gráfica y manejar la lógica de la aplicación.
     def __init__(self, root: Tk) -> None:
         self.root = root
         self.root.title("Automation Cobros - Fase 1")
@@ -52,6 +53,7 @@ class CobrosApp:
         Entry(out_frame, textvariable=self.output_dir).pack(side=LEFT, fill="x", expand=True, padx=(0, 8))
         Button(out_frame, text="Elegir", command=self._choose_output_dir).pack(side=RIGHT)
 
+        #Construcción de los botones de acción y los campos para seleccionar los archivos editados y recalculados.
         actions = Frame(container, pady=8)
         actions.pack(fill="x")
         Button(actions, text="Probar conexion BD", command=self._test_connection).pack(side=LEFT, padx=(0, 8))
@@ -109,6 +111,7 @@ class CobrosApp:
             return
         self._run_background("Consultando compras en SQL Server...", lambda: self._extract_worker(vendor, start, end))
 
+    # Función para extraer información de compras desde la base de datos y generar un archivo preliminar de compras.
     def _extract_worker(self, vendor: str, start: str, end: str) -> None:
         df = fetch_compras(vendor, start, end)
         output = self._output_path(_compras_filename(df, vendor))
@@ -126,12 +129,14 @@ class CobrosApp:
             return
         self._run_background("Recalculando archivo de compras...", lambda: self._recalculate_worker(Path(input_path)))
 
+    # Función para recalcular el archivo de compras editado por el usuario, generando un nuevo archivo con los resultados del recalculo.
     def _recalculate_worker(self, input_path: Path) -> None:
         output = self._output_path(f"{input_path.stem}_Recalculado.xlsx")
         recalculate_compras_file(input_path, output)
         self.recalculated_file.set(str(output))
         self._log(f"Compras recalculado generado: {output}")
 
+    # Función para generar un archivo de validación de condiciones a partir del archivo de compras recalculado, permitiendo al usuario verificar que los cálculos sean correctos.
     def _generate_validation(self) -> None:
         input_path = self.recalculated_file.get().strip() or self.edited_file.get().strip()
         if not input_path:
