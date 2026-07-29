@@ -14,6 +14,9 @@ LOG_DIR = BASE_DIR / "logs"
 DB_DRIVER = os.getenv("COBROS_DB_DRIVER", "ODBC Driver 18 for SQL Server")
 DB_SERVER = os.getenv("COBROS_DB_SERVER", "ATL20AF2222SQ19")
 DB_NAME = os.getenv("COBROS_DB_NAME", "SORIANA_PROJECTS")
+# Las compras de 2025 viven en OTRA base del MISMO servidor. F_COMPRAS existe
+# en ambas; cada una cubre un rango de años (ver FUENTES_COMPRAS en database.py).
+DB_NAME_2025 = os.getenv("COBROS_DB_NAME_2025", "SORIANA_2025_PROJECTS")
 DB_TRUSTED_CONNECTION = os.getenv("COBROS_DB_TRUSTED_CONNECTION", "yes")
 DB_TRUST_SERVER_CERTIFICATE = os.getenv("COBROS_DB_TRUST_SERVER_CERTIFICATE", "yes")
 

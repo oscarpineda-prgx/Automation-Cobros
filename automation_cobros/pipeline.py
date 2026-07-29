@@ -1,0 +1,267 @@
+"""Pipeline de una sola acción: de un proveedor a su archivo de salida.
+
+Encadena las cuatro etapas post-descarga en memoria:
+
+    SQL (compras) → cruce CPA Vision → recálculo → Validación de Condiciones
+
+Asume que la descarga de CPA Vision ya ocurrió (el Parquet existe). No descarga nada.
+
+El Compras se escribe completo aunque sea grande (decisión de Óscar, opción B; ver
+docs/RENDIMIENTO_EXPORTADOR.md). La Validación se arma desde el DataFrame en memoria, sin
+releer el Compras gigante.
+
+Cada proveedor se entrega como un paquete autocontenido dentro de `output_dir`:
+
+    output_dir/
+      <numero>_<nombre>/
+        Compras_<numero>_<nombre>.xlsx
+        Validacion_<numero>_<nombre>.xlsx
+        cpa vision soportes/
+          <request_id>_..._1.zip      (los ZIP de CPA Vision que respaldan la salida)
+"""
+
+from __future__ import annotations
+
+import shutil
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Callable
+
+from automation_cobros.calculations import prepare_compras_dataframe
+from automation_cobros.cruce_cpa import (
+    ResultadoCruce,
+    cargar_cpa,
+    cruzar,
+    request_id_principal,
+    rfc_de_compras,
+    solo_digitos,
+)
+from automation_cobros.database import contar_compras, fetch_compras
+from automation_cobros.excel_exporter import write_compras_files
+from automation_cobros.utils import clean_code, safe_filename
+from automation_cobros.validation_exporter import write_validation_from_dataframe
+
+# Subcarpeta, dentro de la del proveedor, donde se dejan los ZIP de CPA Vision que
+# respaldan la salida. Con espacios, tal como se acordó nombrarla.
+SUBCARPETA_SOPORTES = "cpa vision soportes"
+
+# Arriba de estos renglones el proveedor NO cabe en memoria de una sola vez y se procesa
+# año por año (pipeline_streaming). Debajo se usa el camino normal (todo en memoria), que es
+# más rápido. Celaya (1.24M) y Nestlé (~1.3M) caben; Arca/Pepsico (10-12M) no.
+MAX_FILAS_EN_MEMORIA = 2_500_000
+
+
+@dataclass(slots=True)
+class ResultadoPipeline:
+    rfc: str
+    compras_path: Path  # el primer Compras (para la GUI); todos en `compras_paths`
+    validacion_path: Path
+    cruce: ResultadoCruce | None = None  # None en el camino por año (se cruza por año)
+    compras_paths: list[Path] = field(default_factory=list)
+    proveedor_dir: Path | None = None
+    soportes: list[Path] = field(default_factory=list)
+
+
+def generar_salida_proveedor(
+    vendor: str,
+    start_date: str,
+    end_date: str,
+    parquet_root: Path | str,
+    output_dir: Path | str,
+    *,
+    log: Callable[[str], None] = print,
+) -> ResultadoPipeline:
+    """Genera la salida de un proveedor eligiendo el camino según su tamaño.
+
+    Hace un COUNT barato en SQL: si el proveedor cabe en memoria usa el camino normal (todo
+    de una vez, más rápido); si no, lo procesa año por año (pipeline_streaming), acotando la
+    memoria. El resultado es equivalente; solo cambia cómo se calcula.
+    """
+    try:
+        total = contar_compras(vendor, start_date, end_date)
+        log(f"[0/4] {total:,} renglones en SQL para {vendor} ({start_date}..{end_date}).")
+    except Exception as exc:  # noqa: BLE001 — si el COUNT falla, seguimos por el camino normal
+        total = 0
+        log(f"[0/4] No se pudo contar de antemano ({exc}); se intenta el camino normal.")
+
+    if total > MAX_FILAS_EN_MEMORIA:
+        log(f"      Proveedor grande (> {MAX_FILAS_EN_MEMORIA:,}): se procesa por trimestres.")
+        from automation_cobros.pipeline_streaming import generar_salida_proveedor_por_anios
+
+        return generar_salida_proveedor_por_anios(
+            vendor, start_date, end_date, parquet_root, output_dir, log=log
+        )
+
+    return _generar_salida_en_memoria(
+        vendor, start_date, end_date, parquet_root, output_dir, log=log
+    )
+
+
+def _generar_salida_en_memoria(
+    vendor: str,
+    start_date: str,
+    end_date: str,
+    parquet_root: Path | str,
+    output_dir: Path | str,
+    *,
+    log: Callable[[str], None] = print,
+) -> ResultadoPipeline:
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    log(f"[1/4] Compras de {vendor} ({start_date}..{end_date}) desde SQL Server...")
+    raw = fetch_compras(vendor, start_date, end_date)
+    if raw.empty:
+        raise ValueError(f"El proveedor {vendor} no devolvió compras en ese periodo.")
+    rfc = rfc_de_compras(raw)
+    log(f"      {len(raw):,} renglones · RFC {rfc}")
+
+    log("[2/4] Rellenando columnas EDI desde CPA Vision...")
+    barcodes = set(raw["codbarra"].map(solo_digitos)) - {""}
+    cpa = cargar_cpa(rfc, parquet_root, barcodes=barcodes)
+    if cpa.empty:
+        raise ValueError(f"El RFC {rfc} no tiene datos en el dataset Parquet.")
+    cruce = cruzar(raw, cpa)
+    for linea in cruce.resumen().splitlines():
+        log("      " + linea)
+
+    # Cada proveedor tiene su propia carpeta "<numero>_<nombre>"; adentro van el Compras,
+    # la Validación y la subcarpeta de soportes de CPA Vision. Así queda un paquete
+    # autocontenido por proveedor.
+    base = _nombre_base(raw, vendor)
+    proveedor_dir = output_dir / base
+    proveedor_dir.mkdir(parents=True, exist_ok=True)
+    validacion_path = proveedor_dir / f"Validacion_{base}.xlsx"
+
+    # Soltamos las tablas de origen (grandes y tipo object) antes de la parte pesada:
+    # el cruce ya produjo su propio DataFrame y no volvemos a usar raw ni cpa.
+    del raw, cpa
+
+    # Preparamos UNA sola vez y reusamos para Validación y Compras (antes se preparaba
+    # dos veces, duplicando el pico de memoria en proveedores grandes). `en_sitio` deja
+    # que la preparación reescriba el DataFrame del cruce en vez de copiarlo.
+    prepared = prepare_compras_dataframe(cruce.df, en_sitio=True)
+    cruce.df = prepared
+
+    # La Validación va PRIMERO: es el entregable real y es chica. Así sale aunque el
+    # Compras gigante falle, y trabaja sobre el DataFrame antes de que el exportador le
+    # aplique los valores de fórmula en sitio.
+    log("[3/4] Generando la Validación de Condiciones...")
+    write_validation_from_dataframe(prepared, validacion_path)
+    log(f"      {validacion_path}")
+
+    log("[4/4] Generando el Compras (esto puede tardar en proveedores grandes)...")
+    compras_paths = write_compras_files(
+        prepared, proveedor_dir, base, vendor=vendor,
+        start_date=start_date, end_date=end_date, already_prepared=True,
+    )
+    if len(compras_paths) > 1:
+        log(f"      Proveedor grande: se partio en {len(compras_paths)} archivos por año.")
+    for ruta in compras_paths:
+        log(f"      {ruta}")
+
+    # Los ZIP de CPA Vision quedan junto a la salida como soporte. Es un paso opcional:
+    # si algo falla (falta el ZIP, permisos, disco), se avisa pero NO se tumba la salida,
+    # que ya está escrita.
+    soportes = copiar_soportes_cpa(rfc, parquet_root, proveedor_dir, log=log)
+
+    return ResultadoPipeline(
+        rfc=rfc,
+        compras_path=compras_paths[0],
+        validacion_path=validacion_path,
+        cruce=cruce,
+        compras_paths=compras_paths,
+        proveedor_dir=proveedor_dir,
+        soportes=soportes,
+    )
+
+
+def copiar_soportes_cpa(
+    rfc: str,
+    parquet_root: Path | str,
+    proveedor_dir: Path,
+    *,
+    origen: Path | str | None = None,
+    log: Callable[[str], None] = print,
+) -> list[Path]:
+    """Copia a `proveedor_dir/SUBCARPETA_SOPORTES` el ZIP de soporte de CPA Vision.
+
+    Se copia (no se mueve) **una sola descarga: la más completa**. Si el proveedor se bajó
+    dos veces, la segunda descarga es la misma información repetida, así que NO se copia
+    —solo se avisa que se ignoró—. Un mismo request puede venir partido en varios ZIP
+    (`..._1.zip`, `..._2.zip`): esos sí se copian todos, porque son una sola descarga en
+    pedazos, no información duplicada.
+
+    Idempotente (si el ZIP ya está con el mismo tamaño no se recopia) y nunca lanza:
+    cualquier problema se reporta y devuelve lo que sí se pudo copiar.
+    """
+    # Por convención los ZIP viven junto al dataset Parquet (p. ej. outputs/cpa_vision/,
+    # con el Parquet en outputs/cpa_vision/parquet).
+    origen = Path(origen) if origen else Path(parquet_root).parent
+    destino = Path(proveedor_dir) / SUBCARPETA_SOPORTES
+
+    try:
+        soporte = request_id_principal(rfc, parquet_root)
+    except Exception as exc:  # noqa: BLE001 — soporte opcional, no debe tumbar la salida
+        log(f"      [soportes] No se pudo resolver el request de {rfc}: {exc}")
+        return []
+
+    if not soporte.principal:
+        log(f"      [soportes] Sin request para {rfc}; no hay ZIP que copiar.")
+        return []
+
+    # Una descarga y una sola: las demás son la misma información repetida.
+    if soporte.redundantes:
+        log(
+            f"      [soportes] {rfc} se descargó {len(soporte.redundantes) + 1} veces; se "
+            f"copia solo la más completa (request {soporte.principal}). Ignoradas por "
+            f"duplicadas: {', '.join(soporte.redundantes)}."
+        )
+    # Aviso fuerte si —caso que hoy no ocurre— el principal no cubriera todos los años.
+    if not soporte.cobertura_completa:
+        faltan = sorted(set(soporte.anios_totales) - set(soporte.anios_principal))
+        log(
+            f"      [soportes] AVISO: el request {soporte.principal} no cubre los años "
+            f"{', '.join(faltan)}. Revisa manualmente si necesitas otra descarga."
+        )
+
+    if not origen.is_dir():
+        log(f"      [soportes] No existe la carpeta de descargas: {origen}")
+        return []
+
+    # El nombre empieza con "<request_id>_"; el guion evita casar un id prefijo de otro.
+    candidatos = sorted(origen.glob(f"{soporte.principal}_*.zip"))
+    if not candidatos:
+        log(f"      [soportes] No se hallaron ZIP para request {soporte.principal} en {origen}.")
+        return []
+
+    destino.mkdir(parents=True, exist_ok=True)
+    copiados: list[Path] = []
+    for zip_path in candidatos:
+        final = destino / zip_path.name
+        try:
+            if final.exists() and final.stat().st_size == zip_path.stat().st_size:
+                copiados.append(final)  # ya estaba, se reutiliza
+                continue
+            shutil.copy2(zip_path, final)
+            copiados.append(final)
+        except Exception as exc:  # noqa: BLE001
+            log(f"      [soportes] No se pudo copiar {zip_path.name}: {exc}")
+
+    if copiados:
+        log(f"      [soportes] {len(copiados)} ZIP (request {soporte.principal}) en {destino}")
+    return copiados
+
+
+def _nombre_base(raw, vendor: str) -> str:
+    codigo = clean_code(vendor) or (
+        clean_code(raw["vndnbr"].dropna().iloc[0])
+        if "vndnbr" in raw.columns and raw["vndnbr"].notna().any()
+        else ""
+    )
+    nombre = (
+        str(raw["vndname"].dropna().iloc[0]).strip()
+        if "vndname" in raw.columns and raw["vndname"].notna().any()
+        else ""
+    )
+    return safe_filename(f"{codigo}_{nombre}".strip("_")).rstrip(" .")

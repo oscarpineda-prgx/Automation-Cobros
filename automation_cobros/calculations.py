@@ -3,7 +3,12 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from automation_cobros.utils import clean_code, make_folio, normalize_date_columns, to_number
+from automation_cobros.utils import (
+    clean_code_series,
+    make_folio_series,
+    normalize_date_columns,
+    to_number,
+)
 
 
 EDI_COLUMNS = [
@@ -130,30 +135,60 @@ COMPRAS_COLUMNS = [
 ]
 
 
-def prepare_compras_dataframe(df: pd.DataFrame) -> pd.DataFrame:
-    df = df.copy()
+# Columnas que la preparación necesita como insumo o resultado intermedio y que no salen
+# en el Compras. Todo lo demás que traiga F_COMPRAS se descarta antes de calcular.
+_AUX_COLUMNS = ("folio", "concepto")
+
+
+def prepare_compras_dataframe(df: pd.DataFrame, *, en_sitio: bool = False) -> pd.DataFrame:
+    """Deja el DataFrame listo para el Compras: recalculado y con las 105 columnas en orden.
+
+    Con `en_sitio=True` esta función **toma posesión** del DataFrame recibido y lo muta;
+    quien llama no debe volver a usarlo. Es lo que permite procesar proveedores de más de
+    un millón de renglones: la versión que copiaba en cada paso mantenía cinco copias
+    completas vivas a la vez y agotaba la memoria (ver docs/RENDIMIENTO_EXPORTADOR.md).
+    """
+    if not en_sitio:
+        df = df.copy()
     df.columns = [str(column).strip() for column in df.columns]
-    df = normalize_date_columns(df)
-    df = add_derived_base_columns(df)
-    df = recalculate_dataframe(df)
 
-    for column in COMPRAS_COLUMNS:
-        if column not in df.columns:
-            df[column] = np.nan
-    return df[COMPRAS_COLUMNS]
+    # Recorte temprano: F_COMPRAS devuelve más columnas de las que salen en el Compras y
+    # arrastrarlas por toda la cadena de cálculo es memoria pura.
+    sobrantes = [
+        column
+        for column in df.columns
+        if column not in COMPRAS_COLUMNS and column not in _AUX_COLUMNS
+    ]
+    if sobrantes:
+        df.drop(columns=sobrantes, inplace=True)
+
+    # recalculate_dataframe ya hace normalize_date_columns + add_derived_base_columns;
+    # no hace falta repetirlos aqui (eran bucles por fila corriendo dos veces).
+    df = recalculate_dataframe(df, en_sitio=True)
+
+    faltantes = [column for column in COMPRAS_COLUMNS if column not in df.columns]
+    for column in faltantes:
+        df[column] = np.nan
+    return _reordenar(df, COMPRAS_COLUMNS)
 
 
-def add_derived_base_columns(df: pd.DataFrame) -> pd.DataFrame:
-    df = df.copy()
+def _reordenar(df: pd.DataFrame, columnas: list[str]) -> pd.DataFrame:
+    """Deja solo `columnas` y en ese orden, sin materializar una copia si ya coinciden."""
+    if list(df.columns) == list(columnas):
+        return df
+    df.drop(columns=[c for c in df.columns if c not in columnas], inplace=True)
+    return df[columnas]
+
+
+def add_derived_base_columns(df: pd.DataFrame, *, en_sitio: bool = False) -> pd.DataFrame:
+    if not en_sitio:
+        df = df.copy()
     if "strnbr" in df.columns and "rcvnbr" in df.columns:
-        df["concaten"] = [
-            clean_code(store) + clean_code(receipt)
-            for store, receipt in zip(df["strnbr"], df["rcvnbr"])
-        ]
-        df["folio"] = [
-            make_folio(store, receipt)
-            for store, receipt in zip(df["strnbr"], df["rcvnbr"])
-        ]
+        tienda = clean_code_series(df["strnbr"])
+        nota = clean_code_series(df["rcvnbr"])
+        df["concaten"] = tienda + nota
+        df["folio"] = make_folio_series(df["strnbr"], df["rcvnbr"])
+        del tienda, nota
 
     if "ctouni" in df.columns and "ctouni_sistema" not in df.columns:
         df["ctouni_sistema"] = df["ctouni"]
@@ -164,10 +199,11 @@ def add_derived_base_columns(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def recalculate_dataframe(df: pd.DataFrame) -> pd.DataFrame:
-    df = df.copy()
+def recalculate_dataframe(df: pd.DataFrame, *, en_sitio: bool = False) -> pd.DataFrame:
+    if not en_sitio:
+        df = df.copy()
     df = normalize_date_columns(df)
-    df = add_derived_base_columns(df)
+    df = add_derived_base_columns(df, en_sitio=True)
 
     ctonto_edi = to_number(_col(df, "ctonto_edi"))
     ctouni = to_number(_col(df, "ctouni"))
@@ -193,10 +229,7 @@ def recalculate_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     df["ctontopza"] = ctonto_edi
 
     if "folio" not in df.columns:
-        df["folio"] = [
-            make_folio(store, receipt)
-            for store, receipt in zip(_col(df, "strnbr"), _col(df, "rcvnbr"))
-        ]
+        df["folio"] = make_folio_series(_col(df, "strnbr"), _col(df, "rcvnbr"))
 
     df["debio_pagar_ne"] = df.groupby("folio", dropna=False)["imp_aud"].transform("sum").round(4)
     df["dpagar"] = df["debio_pagar_ne"]
@@ -205,7 +238,7 @@ def recalculate_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     df["tot_pagado_ne"] = tot_pagado_ne
     df["dif_det_ne"] = (to_number(df["tot_pagado_ne"]) - to_number(df["debio_pagar_ne"])).round(4)
 
-    df = _recalculate_invoice_level(df)
+    df = _recalculate_invoice_level(df, en_sitio=True)
     if "concepto" not in df.columns:
         df["concepto"] = ""
     else:
@@ -213,12 +246,61 @@ def recalculate_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def apply_display_formula_values(df: pd.DataFrame, *, en_sitio: bool = False) -> pd.DataFrame:
+    """Calcula en Python las columnas que antes eran fórmulas vivas de Excel.
+
+    Reemplaza el bloque de fórmulas del exportador para poder escribir el Compras como
+    **valores** (rápido y sin el límite del VLOOKUP). Las definiciones replican las
+    fórmulas originales del archivo, con guardas para no dividir entre cero.
+
+    Con `en_sitio=True` muta el DataFrame recibido en vez de copiarlo.
+    """
+    if not en_sitio:
+        df = df.copy()
+    fact_empaq = to_number(_col(df, "fact_empaq"))
+    can_rec = to_number(_col(df, "can_rec"))
+    canfac_edi = to_number(_col(df, "canfac_edi"))
+    ctonto_edi = to_number(_col(df, "ctonto_edi"))
+    grs = to_number(_col(df, "poitmgrscst"))
+    net = to_number(_col(df, "poitmnetcst"))
+
+    df["fante"] = (canfac_edi * fact_empaq) - can_rec
+    facdecto = np.where(grs != 0, 100 - (net / grs.replace(0, np.nan)) * 100, 0.0)
+    df["facdecto"] = pd.Series(facdecto, index=df.index).fillna(0.0).round(6)
+    ctouni_sistema = np.where(
+        fact_empaq != 0, (grs / fact_empaq.replace(0, np.nan)) * (1 - to_number(df["facdecto"]) / 100), 0.0
+    )
+    df["ctouni_sistema"] = pd.Series(ctouni_sistema, index=df.index).fillna(0.0).round(6)
+
+    sistema = to_number(df["ctouni_sistema"])
+    mejor = np.where((ctonto_edi < sistema) & (ctonto_edi > 0), ctonto_edi, sistema)
+    df["ctontol"] = pd.Series(mejor, index=df.index).round(6)
+
+    df["imp"] = 0.16
+    df["impaud"] = (to_number(df["ctontol"]) * can_rec * (1 + 0.16)).round(4)
+    df["dif cto fac ctouni"] = (ctonto_edi - to_number(df["ctontol"])).round(4)
+    df["ctontopza"] = np.where(fact_empaq != 0, ctonto_edi / fact_empaq.replace(0, np.nan), 0.0)
+    df["ctontopza"] = pd.Series(df["ctontopza"], index=df.index).fillna(0.0).round(6)
+
+    # dpagar = suma de impaud por folio (lo que hacía el SUMIF del VLOOKUP, sin tope de filas).
+    if "concaten" in df.columns:
+        df["dpagar"] = df.groupby("concaten", dropna=False)["impaud"].transform("sum").round(4)
+    else:
+        df["dpagar"] = df["impaud"]
+    return df
+
+
 def build_pending_edi_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     existing = [column for column in EDI_COLUMNS if column in df.columns]
     if not existing:
         return pd.DataFrame()
-    mask = df[existing].isna() | df[existing].astype(str).eq("")
-    pending = df.loc[mask.any(axis=1)].copy()
+    # Máscara acumulada columna a columna: `df[existing].astype(str)` materializaba una
+    # tabla de texto del tamaño del bloque EDI completo.
+    mask = pd.Series(False, index=df.index)
+    for column in existing:
+        serie = df[column]
+        mask |= serie.isna() | serie.astype(str).eq("")
+    pending = df.loc[mask].copy()
     keep = [
         "folio",
         "vndnbr",
@@ -257,8 +339,9 @@ def _best_total_paid_ne(df: pd.DataFrame) -> pd.Series:
     return group_paid.round(4)
 
 
-def _recalculate_invoice_level(df: pd.DataFrame) -> pd.DataFrame:
-    df = df.copy()
+def _recalculate_invoice_level(df: pd.DataFrame, *, en_sitio: bool = False) -> pd.DataFrame:
+    if not en_sitio:
+        df = df.copy()
     invoice_key = _invoice_group_key(df)
     df["_invoice_key"] = invoice_key
     df["debio_pagar_inv"] = df.groupby("_invoice_key", dropna=False)["imp_aud"].transform("sum").round(4)
@@ -273,14 +356,15 @@ def _recalculate_invoice_level(df: pd.DataFrame) -> pd.DataFrame:
         "key", dropna=False
     )["paid"].transform("max").round(4)
     df["dif_det_inv"] = (to_number(df["tot_pagado_inv"]) - to_number(df["debio_pagar_inv"])).round(4)
-    return df.drop(columns=["_invoice_key"])
+    df.drop(columns=["_invoice_key"], inplace=True)
+    return df
 
 
 def _invoice_group_key(df: pd.DataFrame) -> pd.Series:
     parts = []
     for column in ["vndnbr", "strnbr", "invnbr"]:
         if column in df.columns:
-            parts.append(df[column].map(clean_code))
+            parts.append(clean_code_series(df[column]))
     if not parts:
         return pd.Series([""] * len(df), index=df.index)
     key = parts[0]

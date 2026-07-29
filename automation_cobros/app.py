@@ -1,200 +1,505 @@
+"""GUI de Automation Cobros — PRGX Soriana Audit Suite.
+
+Dos etapas:
+
+- **Etapa 1** — pipeline SQL Server → Excel: generar Compras, recalcular el editado por
+  el auditor y producir la Validacion de Condiciones.
+- **Etapa 2** — CPA Vision: llena las columnas EDI de Compras con los CFDI del dataset
+  Parquet. Ver `docs/CRUCE_IMPLEMENTACION.md`.
+
+La presentacion (paleta, tarjetas, indicadores) vive en `ui.py`.
+"""
+
 from __future__ import annotations
 
 import queue
 import threading
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
-from tkinter import END, LEFT, RIGHT, W, Button, Entry, Frame, Label, StringVar, Tk, filedialog, messagebox, scrolledtext
+from tkinter import filedialog, messagebox
+
+import customtkinter as ctk
+from PIL import Image
 
 import config
+from automation_cobros import ui
 from automation_cobros.database import fetch_compras, test_connection
 from automation_cobros.excel_exporter import write_compras_workbook
 from automation_cobros.recalculate import recalculate_compras_file
 from automation_cobros.utils import clean_code, safe_filename
 from automation_cobros.validation_exporter import write_validation_workbook
 
+_TOKENS_ERROR = ("error", "exception", "traceback")
+_TOKENS_OK = ("generado", "generada", "correcta", "completad", "cruzados", "salida:")
 
-class CobrosApp:
-    #Definición de la clase CobrosApp, se encarga de construir la interfaz gráfica y manejar la lógica de la aplicación.
-    def __init__(self, root: Tk) -> None:
-        self.root = root
-        self.root.title("Automation Cobros - Fase 1")
-        self.root.geometry("860x620")
-        self.root.minsize(780, 560)
-        self.messages: queue.Queue[str] = queue.Queue()
 
-        today = date.today()
-        self.vendor = StringVar(value="")
-        self.start_date = StringVar(value=f"{today.year - 6}-01-01")
-        self.end_date = StringVar(value=f"{today.year - 1}-01-01")
-        self.output_dir = StringVar(value=str(config.OUTPUT_DIR))
-        self.edited_file = StringVar(value="")
-        self.recalculated_file = StringVar(value="")
+class CobrosApp(ctk.CTk):
+    def __init__(self) -> None:
+        super().__init__()
+        self.tema = ui.Tema("light")
+        self.mensajes: queue.Queue[str] = queue.Queue()
+        self.indicadores = ui.Indicadores(self, self.tema)
+        self._ocupado = False
 
-        self._build_ui()
-        self._poll_messages()
+        hoy = date.today()
+        self.proveedor = ctk.StringVar(value="")
+        self.fecha_inicial = ctk.StringVar(value=f"{hoy.year - 6}-01-01")
+        self.fecha_final = ctk.StringVar(value=f"{hoy.year - 1}-01-01")
+        self.carpeta_salida = ctk.StringVar(value=str(config.OUTPUT_DIR))
+        self.archivo_editado = ctk.StringVar(value="")
+        self.archivo_recalculado = ctk.StringVar(value="")
+        self.rfc = ctk.StringVar(value="")
+        self.carpeta_parquet = ctk.StringVar(value=str(config.OUTPUT_DIR / "cpa_vision" / "parquet"))
 
-    def _build_ui(self) -> None:
-        container = Frame(self.root, padx=16, pady=14)
-        container.pack(fill="both", expand=True)
+        ctk.set_appearance_mode(self.tema.modo)
+        ctk.set_default_color_theme("dark-blue")
+        self._configurar_ventana()
+        self._construir()
+        self._procesar_mensajes()
+        self._log("Listo. Etapa 1: generar Compras, editar en Excel, recalcular y validar.")
 
-        title = Label(container, text="Automation Cobros - Fase 1", font=("Segoe UI", 16, "bold"))
-        title.pack(anchor=W, pady=(0, 12))
+    # -- Ventana ------------------------------------------------------------
 
-        form = Frame(container)
-        form.pack(fill="x")
-        self._field(form, "Proveedor", self.vendor, 0, 0, width=16)
-        self._field(form, "Fecha inicial", self.start_date, 0, 2, width=16)
-        self._field(form, "Fecha final", self.end_date, 0, 4, width=16)
+    def _configurar_ventana(self) -> None:
+        self.title("Automation Cobros — PRGX")
+        self.geometry("1160x900")
+        self.minsize(1000, 740)
+        self.configure(fg_color=self.tema("bg1"))
+        if ui.ICONO_PRGX.exists():
+            try:
+                from PIL import ImageTk
 
-        out_frame = Frame(container, pady=8)
-        out_frame.pack(fill="x")
-        Label(out_frame, text="Carpeta salida", width=14, anchor=W).pack(side=LEFT)
-        Entry(out_frame, textvariable=self.output_dir).pack(side=LEFT, fill="x", expand=True, padx=(0, 8))
-        Button(out_frame, text="Elegir", command=self._choose_output_dir).pack(side=RIGHT)
+                self._icono = ImageTk.PhotoImage(Image.open(ui.ICONO_PRGX).resize((32, 32)))
+                self.iconphoto(True, self._icono)
+            except Exception:
+                pass
 
-        #Construcción de los botones de acción y los campos para seleccionar los archivos editados y recalculados.
-        actions = Frame(container, pady=8)
-        actions.pack(fill="x")
-        Button(actions, text="Probar conexion BD", command=self._test_connection).pack(side=LEFT, padx=(0, 8))
-        Button(actions, text="1. Generar Compras preliminar", command=self._extract_compras).pack(side=LEFT, padx=(0, 8))
-        Button(actions, text="2. Recalcular Compras editado", command=self._recalculate_file).pack(side=LEFT, padx=(0, 8))
-        Button(actions, text="3. Generar Validacion", command=self._generate_validation).pack(side=LEFT)
+    def _construir(self) -> None:
+        self.grid_rowconfigure(2, weight=5)  # tarjetas
+        self.grid_rowconfigure(3, weight=2)  # bitacora
+        self.grid_columnconfigure(0, weight=1)
+        self._encabezado()
+        self._barra_configuracion()
+        self._area_principal()
+        self._area_bitacora()
 
-        files = Frame(container, pady=8)
-        files.pack(fill="x")
-        Label(files, text="Compras editado", width=14, anchor=W).grid(row=0, column=0, sticky=W, pady=3)
-        Entry(files, textvariable=self.edited_file).grid(row=0, column=1, sticky="ew", padx=(0, 8))
-        Button(files, text="Elegir", command=self._choose_edited_file).grid(row=0, column=2, sticky=W)
-        Label(files, text="Compras recalculado", width=14, anchor=W).grid(row=1, column=0, sticky=W, pady=3)
-        Entry(files, textvariable=self.recalculated_file).grid(row=1, column=1, sticky="ew", padx=(0, 8))
-        Button(files, text="Elegir", command=self._choose_recalculated_file).grid(row=1, column=2, sticky=W)
-        files.columnconfigure(1, weight=1)
+    # -- Encabezado ---------------------------------------------------------
 
-        Label(container, text="Bitacora", font=("Segoe UI", 10, "bold")).pack(anchor=W, pady=(10, 4))
-        self.log = scrolledtext.ScrolledText(container, height=18, wrap="word")
-        self.log.pack(fill="both", expand=True)
-        self._log("Listo. Flujo recomendado: generar Compras, editar en Excel, recalcular, generar Validacion.")
+    def _encabezado(self) -> None:
+        hdr = ctk.CTkFrame(self, fg_color=self.tema("bg2"), corner_radius=0, height=76)
+        hdr.grid(row=0, column=0, sticky="ew")
+        hdr.grid_propagate(False)
+        hdr.grid_columnconfigure(1, weight=1)
 
-    def _field(self, parent: Frame, label: str, variable: StringVar, row: int, col: int, width: int) -> None:
-        Label(parent, text=label, anchor=W).grid(row=row, column=col, sticky=W, padx=(0, 4))
-        Entry(parent, textvariable=variable, width=width).grid(row=row, column=col + 1, sticky=W, padx=(0, 16))
+        ctk.CTkFrame(hdr, fg_color=self.tema("accent"), height=3, corner_radius=0).grid(
+            row=0, column=0, columnspan=6, sticky="ew"
+        )
 
-    def _choose_output_dir(self) -> None:
-        selected = filedialog.askdirectory(initialdir=self.output_dir.get() or str(config.OUTPUT_DIR))
-        if selected:
-            self.output_dir.set(selected)
+        if ui.ICONO_PRGX.exists():
+            icono = ctk.CTkImage(Image.open(ui.ICONO_PRGX), size=(42, 42))
+            ctk.CTkLabel(hdr, image=icono, text="").grid(row=1, column=0, padx=(18, 10), pady=10)
 
-    def _choose_edited_file(self) -> None:
-        selected = filedialog.askopenfilename(filetypes=[("Excel", "*.xlsx")])
-        if selected:
-            self.edited_file.set(selected)
+        titulo = ctk.CTkFrame(hdr, fg_color="transparent")
+        titulo.grid(row=1, column=1, sticky="w", pady=10)
+        ctk.CTkLabel(
+            titulo,
+            text="Automation Cobros",
+            font=ctk.CTkFont(ui.FUENTE, 17, weight="bold"),
+            text_color=self.tema("t1"),
+        ).pack(anchor="w")
+        ctk.CTkLabel(
+            titulo,
+            text="PRGX  ·  Soriana Audit Suite",
+            font=ctk.CTkFont(ui.FUENTE, 10),
+            text_color=self.tema("t2"),
+        ).pack(anchor="w")
 
-    def _choose_recalculated_file(self) -> None:
-        selected = filedialog.askopenfilename(filetypes=[("Excel", "*.xlsx")])
-        if selected:
-            self.recalculated_file.set(selected)
+        if ui.LOGO_SORIANA.exists():
+            logo = ctk.CTkImage(Image.open(ui.LOGO_SORIANA), size=(140, 40))
+            ctk.CTkLabel(hdr, image=logo, text="").grid(row=1, column=2, padx=(0, 14), pady=10)
 
-    def _test_connection(self) -> None:
-        self._run_background("Probando conexion a SQL Server...", self._test_connection_worker)
+        ctk.CTkFrame(hdr, fg_color=self.tema("border"), width=1, height=34).grid(
+            row=1, column=3, padx=8, pady=10
+        )
 
-    def _test_connection_worker(self) -> None:
-        test_connection()
-        self._log("Conexion correcta.")
+        ctk.CTkButton(
+            hdr,
+            text=self.tema.etiqueta_boton,
+            width=96,
+            height=30,
+            font=ctk.CTkFont(ui.FUENTE, 11),
+            fg_color=self.tema("card"),
+            hover_color=self.tema("card2"),
+            text_color=self.tema("t2"),
+            corner_radius=15,
+            border_width=1,
+            border_color=self.tema("border"),
+            command=self._alternar_tema,
+        ).grid(row=1, column=4, padx=(0, 18), pady=10)
 
-    def _extract_compras(self) -> None:
-        vendor = self.vendor.get().strip()
-        start = self.start_date.get().strip()
-        end = self.end_date.get().strip()
-        if not vendor or not start or not end:
+    def _barra_configuracion(self) -> None:
+        barra = ctk.CTkFrame(self, fg_color=self.tema("card"), corner_radius=0, height=54)
+        barra.grid(row=1, column=0, sticky="ew")
+        barra.grid_propagate(False)
+
+        ui.campo(barra, self.tema, etiqueta="Proveedor", variable=self.proveedor, ancho=110)
+        ui.campo(barra, self.tema, etiqueta="Desde", variable=self.fecha_inicial, ancho=110)
+        ui.campo(barra, self.tema, etiqueta="Hasta", variable=self.fecha_final, ancho=110)
+        ui.campo(barra, self.tema, etiqueta="Salida", variable=self.carpeta_salida, ancho=300)
+        ui.boton_secundario(barra, self.tema, texto="Elegir", comando=self._elegir_salida)
+
+    # -- Tarjetas -----------------------------------------------------------
+
+    def _area_principal(self) -> None:
+        area = ctk.CTkScrollableFrame(self, fg_color=self.tema("bg1"), corner_radius=0)
+        area.grid(row=2, column=0, sticky="nsew", pady=(2, 0))
+        area.grid_columnconfigure((0, 1), weight=1, uniform="col")
+        self._tarjeta_compras(area)
+        self._tarjeta_cpa(area)
+
+    def _tarjeta_compras(self, parent: ctk.CTkFrame) -> None:
+        card = ui.tarjeta(parent, self.tema, col=0)
+        ui.titulo_seccion(
+            card,
+            self.tema,
+            titulo="ETAPA 1",
+            subtitulo="Pipeline de Compras · SQL Server → Excel",
+            insignia="01",
+        )
+        ui.boton_principal(
+            card, self.tema, self.indicadores,
+            texto="▶  Generar Compras preliminar", clave="extraer",
+            comando=self._extraer_compras,
+        )
+        ui.separador(card, self.tema)
+        ui.pista(card, self.tema, "El auditor edita el archivo en Excel antes de continuar")
+        ui.boton_paso(
+            card, self.tema, self.indicadores,
+            texto="  ⟳  Recalcular Compras editado", clave="recalcular",
+            comando=self._recalcular,
+        )
+        ui.boton_paso(
+            card, self.tema, self.indicadores,
+            texto="  ✦  Generar Validación de Condiciones", clave="validar",
+            comando=self._validar,
+        )
+        ui.separador(card, self.tema)
+        ui.boton_paso(
+            card, self.tema, self.indicadores,
+            texto="  ⚡  Probar conexión a SQL Server", clave="conexion",
+            comando=self._probar_conexion,
+        )
+        self._selector(card, "Compras editado", self.archivo_editado)
+        self._selector(card, "Compras recalculado", self.archivo_recalculado)
+
+    def _tarjeta_cpa(self, parent: ctk.CTkFrame) -> None:
+        card = ui.tarjeta(parent, self.tema, col=1)
+        ui.titulo_seccion(
+            card,
+            self.tema,
+            titulo="ETAPA 2",
+            subtitulo="CPA Vision · Rellena las columnas EDI",
+            insignia="02",
+        )
+        ui.boton_principal(
+            card, self.tema, self.indicadores,
+            texto="▶  Generar salida completa (1 clic)", clave="salida",
+            comando=self._generar_salida,
+        )
+        ui.pista(card, self.tema, "Compras → cruce → recálculo → Validación, de corrido")
+        ui.pista(card, self.tema, "Usa Proveedor y fechas de la barra superior")
+        ui.separador(card, self.tema)
+        ui.boton_paso(
+            card, self.tema, self.indicadores,
+            texto="  ⇄  Solo rellenar EDI (sobre un Compras)", clave="cruce",
+            comando=self._cruzar_cpa,
+        )
+        ui.pista(card, self.tema, "El RFC se detecta solo del Compras; solo llénalo para forzar otro")
+
+        fila_rfc = ctk.CTkFrame(card, fg_color="transparent")
+        fila_rfc.pack(fill="x", padx=14)
+        ui.campo(fila_rfc, self.tema, etiqueta="RFC (opcional)", variable=self.rfc, ancho=180)
+
+        fila_pq = ctk.CTkFrame(card, fg_color="transparent")
+        fila_pq.pack(fill="x", padx=14)
+        ui.campo(fila_pq, self.tema, etiqueta="Parquet", variable=self.carpeta_parquet, ancho=250)
+        ui.boton_secundario(fila_pq, self.tema, texto="Elegir", comando=self._elegir_parquet)
+
+    def _selector(self, parent: ctk.CTkFrame, etiqueta: str, variable: ctk.StringVar) -> None:
+        fila = ctk.CTkFrame(parent, fg_color="transparent")
+        fila.pack(fill="x", padx=14)
+        ui.campo(fila, self.tema, etiqueta=etiqueta, variable=variable, ancho=250)
+        ui.boton_secundario(
+            fila, self.tema, texto="Elegir", comando=lambda: self._elegir_excel(variable)
+        )
+
+    # -- Bitacora -----------------------------------------------------------
+
+    def _area_bitacora(self) -> None:
+        marco = ctk.CTkFrame(self, fg_color=self.tema("bg2"), corner_radius=0)
+        marco.grid(row=3, column=0, sticky="nsew", pady=(2, 0))
+        marco.grid_columnconfigure(0, weight=1)
+        marco.grid_rowconfigure(1, weight=1)
+
+        cabecera = ctk.CTkFrame(marco, fg_color="transparent")
+        cabecera.grid(row=0, column=0, sticky="ew", padx=16, pady=(8, 2))
+        ctk.CTkLabel(
+            cabecera,
+            text="BITÁCORA DE EJECUCIÓN",
+            font=ctk.CTkFont(ui.FUENTE, 9, weight="bold"),
+            text_color=self.tema("t2"),
+        ).pack(side="left")
+        ctk.CTkButton(
+            cabecera,
+            text="Limpiar",
+            width=60,
+            height=22,
+            font=ctk.CTkFont(ui.FUENTE, 10),
+            fg_color=self.tema("card2"),
+            hover_color=self.tema("card"),
+            text_color=self.tema("t2"),
+            corner_radius=4,
+            command=self._limpiar_bitacora,
+        ).pack(side="right")
+
+        self.bitacora = ctk.CTkTextbox(
+            marco,
+            fg_color=self.tema("bg2"),
+            text_color=self.tema("t1"),
+            font=ctk.CTkFont("Consolas", 11),
+            border_width=0,
+            corner_radius=0,
+        )
+        self.bitacora.grid(row=1, column=0, sticky="nsew")
+        self.bitacora.configure(state="disabled")
+
+        texto = self.bitacora._textbox
+        texto.tag_configure("ts", foreground=self.tema("t2"))
+        texto.tag_configure("info", foreground=self.tema("t1"))
+        texto.tag_configure("ok", foreground=self.tema("s_ok"))
+        texto.tag_configure("error", foreground=self.tema("s_err"))
+
+    def _log(self, mensaje: str) -> None:
+        self.mensajes.put(f"[{datetime.now():%H:%M:%S}]  {mensaje}\n")
+
+    def _escribir(self, linea: str) -> None:
+        texto = self.bitacora._textbox
+        texto.configure(state="normal")
+        if "]  " in linea:
+            marca, cuerpo = linea.split("]  ", 1)
+            minusculas = cuerpo.lower()
+            etiqueta = (
+                "error"
+                if any(t in minusculas for t in _TOKENS_ERROR)
+                else "ok"
+                if any(t in minusculas for t in _TOKENS_OK)
+                else "info"
+            )
+            texto.insert("end", marca + "]  ", "ts")
+            texto.insert("end", cuerpo, etiqueta)
+        else:
+            texto.insert("end", linea, "info")
+        texto.see("end")
+        texto.configure(state="disabled")
+
+    def _limpiar_bitacora(self) -> None:
+        self.bitacora.configure(state="normal")
+        self.bitacora.delete("1.0", "end")
+        self.bitacora.configure(state="disabled")
+
+    def _procesar_mensajes(self) -> None:
+        try:
+            while True:
+                self._escribir(self.mensajes.get_nowait())
+        except queue.Empty:
+            pass
+        self.after(120, self._procesar_mensajes)
+
+    # -- Tema ---------------------------------------------------------------
+
+    def _alternar_tema(self) -> None:
+        contenido = self.bitacora.get("1.0", "end-1c")
+        self.indicadores.limpiar()
+        self.tema.alternar()
+        for hijo in self.winfo_children():
+            hijo.destroy()
+        self.configure(fg_color=self.tema("bg1"))
+        self._construir()
+        if contenido.strip():
+            self.bitacora.configure(state="normal")
+            self.bitacora.insert("1.0", contenido + "\n")
+            self.bitacora.configure(state="disabled")
+
+    # -- Dialogos -----------------------------------------------------------
+
+    def _elegir_salida(self) -> None:
+        elegido = filedialog.askdirectory(initialdir=self.carpeta_salida.get() or str(config.OUTPUT_DIR))
+        if elegido:
+            self.carpeta_salida.set(elegido)
+
+    def _elegir_parquet(self) -> None:
+        elegido = filedialog.askdirectory(initialdir=self.carpeta_parquet.get())
+        if elegido:
+            self.carpeta_parquet.set(elegido)
+
+    def _elegir_excel(self, variable: ctk.StringVar) -> None:
+        elegido = filedialog.askopenfilename(filetypes=[("Excel", "*.xlsx *.xlsm")])
+        if elegido:
+            variable.set(elegido)
+
+    # -- Acciones -----------------------------------------------------------
+
+    def _probar_conexion(self) -> None:
+        def tarea() -> None:
+            test_connection()
+            self._log("Conexión correcta.")
+
+        self._ejecutar("conexion", "Probando conexión a SQL Server...", tarea)
+
+    def _extraer_compras(self) -> None:
+        proveedor = self.proveedor.get().strip()
+        inicio = self.fecha_inicial.get().strip()
+        fin = self.fecha_final.get().strip()
+        if not (proveedor and inicio and fin):
             messagebox.showerror("Datos incompletos", "Captura proveedor, fecha inicial y fecha final.")
             return
-        self._run_background("Consultando compras en SQL Server...", lambda: self._extract_worker(vendor, start, end))
 
-    # Función para extraer información de compras desde la base de datos y generar un archivo preliminar de compras.
-    def _extract_worker(self, vendor: str, start: str, end: str) -> None:
-        df = fetch_compras(vendor, start, end)
-        output = self._output_path(_compras_filename(df, vendor))
-        write_compras_workbook(df, output, vendor=vendor, start_date=start, end_date=end)
-        self.edited_file.set(str(output))
-        self._log(f"Compras preliminar generado: {output}")
-        self._log(f"Filas extraidas: {len(df):,}")
+        def tarea() -> None:
+            df = fetch_compras(proveedor, inicio, fin)
+            salida = self._ruta_salida(_nombre_compras(df, proveedor))
+            write_compras_workbook(df, salida, vendor=proveedor, start_date=inicio, end_date=fin)
+            self.archivo_editado.set(str(salida))
+            self._log(f"Compras preliminar generado: {salida}")
+            self._log(f"Filas extraídas: {len(df):,}")
 
-    def _recalculate_file(self) -> None:
-        input_path = self.edited_file.get().strip()
-        if not input_path:
-            self._choose_edited_file()
-            input_path = self.edited_file.get().strip()
-        if not input_path:
+        self._ejecutar("extraer", "Consultando compras en SQL Server...", tarea)
+
+    def _recalcular(self) -> None:
+        entrada = self._pedir_archivo(self.archivo_editado)
+        if not entrada:
             return
-        self._run_background("Recalculando archivo de compras...", lambda: self._recalculate_worker(Path(input_path)))
 
-    # Función para recalcular el archivo de compras editado por el usuario, generando un nuevo archivo con los resultados del recalculo.
-    def _recalculate_worker(self, input_path: Path) -> None:
-        output = self._output_path(f"{input_path.stem}_Recalculado.xlsx")
-        recalculate_compras_file(input_path, output)
-        self.recalculated_file.set(str(output))
-        self._log(f"Compras recalculado generado: {output}")
+        def tarea() -> None:
+            salida = self._ruta_salida(f"{entrada.stem}_Recalculado.xlsx")
+            recalculate_compras_file(entrada, salida)
+            self.archivo_recalculado.set(str(salida))
+            self._log(f"Compras recalculado generado: {salida}")
 
-    # Función para generar un archivo de validación de condiciones a partir del archivo de compras recalculado, permitiendo al usuario verificar que los cálculos sean correctos.
-    def _generate_validation(self) -> None:
-        input_path = self.recalculated_file.get().strip() or self.edited_file.get().strip()
-        if not input_path:
-            self._choose_recalculated_file()
-            input_path = self.recalculated_file.get().strip()
-        if not input_path:
+        self._ejecutar("recalcular", "Recalculando archivo de compras...", tarea)
+
+    def _validar(self) -> None:
+        ruta = self.archivo_recalculado.get().strip() or self.archivo_editado.get().strip()
+        if not ruta:
+            self._elegir_excel(self.archivo_recalculado)
+            ruta = self.archivo_recalculado.get().strip()
+        if not ruta:
             return
-        self._run_background("Generando Validacion de Condiciones...", lambda: self._validation_worker(Path(input_path)))
+        entrada = Path(ruta)
 
-    def _validation_worker(self, input_path: Path) -> None:
-        output = self._output_path(f"{input_path.stem}_Validacion_Condiciones.xlsx")
-        write_validation_workbook(input_path, output)
-        self._log(f"Validacion generada: {output}")
+        def tarea() -> None:
+            salida = self._ruta_salida(f"{entrada.stem}_Validacion_Condiciones.xlsx")
+            write_validation_workbook(entrada, salida)
+            self._log(f"Validación generada: {salida}")
 
-    def _output_path(self, filename: str) -> Path:
-        folder = Path(self.output_dir.get().strip() or config.OUTPUT_DIR)
-        folder.mkdir(parents=True, exist_ok=True)
-        return folder / filename
+        self._ejecutar("validar", "Generando Validación de Condiciones...", tarea)
 
-    def _run_background(self, start_message: str, worker) -> None:
-        self._log(start_message)
+    def _generar_salida(self) -> None:
+        proveedor = self.proveedor.get().strip()
+        inicio = self.fecha_inicial.get().strip()
+        fin = self.fecha_final.get().strip()
+        if not (proveedor and inicio and fin):
+            messagebox.showerror("Datos incompletos", "Captura proveedor, fecha inicial y fecha final.")
+            return
+        parquet = Path(self.carpeta_parquet.get().strip())
+        if not parquet.exists():
+            messagebox.showerror("Ruta inválida", f"No existe la carpeta Parquet:\n{parquet}")
+            return
 
-        def target() -> None:
+        def tarea() -> None:
+            from automation_cobros.pipeline import generar_salida_proveedor
+
+            resultado = generar_salida_proveedor(
+                proveedor, inicio, fin, parquet, self.carpeta_salida.get().strip() or config.OUTPUT_DIR,
+                log=self._log,
+            )
+            self.archivo_editado.set(str(resultado.compras_path))
+            self._log(f"✓ Validación lista: {resultado.validacion_path}")
+
+        self._ejecutar("salida", "Generando salida completa...", tarea)
+
+    def _cruzar_cpa(self) -> None:
+        parquet = Path(self.carpeta_parquet.get().strip())
+        if not parquet.exists():
+            messagebox.showerror("Ruta inválida", f"No existe la carpeta Parquet:\n{parquet}")
+            return
+        entrada = self._pedir_archivo(self.archivo_editado)
+        if not entrada:
+            return
+
+        rfc_forzado = self.rfc.get().strip().upper() or None
+
+        def tarea() -> None:
+            from automation_cobros.cruce_cpa import cruzar_proveedor
+
+            resultado, rfc = cruzar_proveedor(entrada, parquet, rfc=rfc_forzado)
+            self._log(f"RFC del proveedor: {rfc}")
+            if resultado.cruzados == 0:
+                self._log("ERROR: no se cruzó ningún renglón (¿RFC sin datos en el Parquet?).")
+                return
+            for linea in resultado.resumen().splitlines():
+                self._log(linea)
+            salida = self._ruta_salida(f"{entrada.stem}_EDI.xlsx")
+            resultado.df.to_excel(salida, index=False)
+            self.archivo_editado.set(str(salida))
+            self._log(f"Salida: {salida}")
+
+        self._ejecutar("cruce", "Cruzando CPA Vision...", tarea)
+
+    # -- Infraestructura ----------------------------------------------------
+
+    def _pedir_archivo(self, variable: ctk.StringVar) -> Path | None:
+        ruta = variable.get().strip()
+        if not ruta:
+            self._elegir_excel(variable)
+            ruta = variable.get().strip()
+        return Path(ruta) if ruta else None
+
+    def _ruta_salida(self, nombre: str) -> Path:
+        carpeta = Path(self.carpeta_salida.get().strip() or config.OUTPUT_DIR)
+        carpeta.mkdir(parents=True, exist_ok=True)
+        return carpeta / nombre
+
+    def _ejecutar(self, clave: str, mensaje: str, tarea) -> None:
+        if self._ocupado:
+            self._log("Hay una operación en curso; espera a que termine.")
+            return
+        self._ocupado = True
+        self._log(mensaje)
+        self.indicadores.estado(clave, "running")
+
+        def envoltura() -> None:
             try:
-                worker()
+                tarea()
+                self.indicadores.estado(clave, "ok")
             except Exception as exc:
                 self._log(f"ERROR: {exc}")
+                self.indicadores.estado(clave, "error")
+            finally:
+                self._ocupado = False
 
-        threading.Thread(target=target, daemon=True).start()
-
-    def _log(self, message: str) -> None:
-        self.messages.put(message)
-
-    def _poll_messages(self) -> None:
-        while True:
-            try:
-                message = self.messages.get_nowait()
-            except queue.Empty:
-                break
-            self.log.insert(END, message + "\n")
-            self.log.see(END)
-        self.root.after(200, self._poll_messages)
+        threading.Thread(target=envoltura, daemon=True).start()
 
 
 def run_app() -> None:
-    root = Tk()
-    CobrosApp(root)
-    root.mainloop()
+    CobrosApp().mainloop()
 
 
-def _compras_filename(df, vendor: str) -> str:
-    vendor_code = clean_code(vendor)
-    vendor_name = ""
+def _nombre_compras(df, proveedor: str) -> str:
+    codigo = clean_code(proveedor)
+    nombre = ""
     if not df.empty:
-        if not vendor_code and "vndnbr" in df.columns and df["vndnbr"].notna().any():
-            vendor_code = clean_code(df["vndnbr"].dropna().iloc[0])
+        if not codigo and "vndnbr" in df.columns and df["vndnbr"].notna().any():
+            codigo = clean_code(df["vndnbr"].dropna().iloc[0])
         if "vndname" in df.columns and df["vndname"].notna().any():
-            vendor_name = str(df["vndname"].dropna().iloc[0]).strip()
-
-    filename = safe_filename(f"Compras_{vendor_code}_{vendor_name}".strip("_")).rstrip(" .")
-    return f"{filename}.xlsx"
+            nombre = str(df["vndname"].dropna().iloc[0]).strip()
+    return f"{safe_filename(f'Compras_{codigo}_{nombre}'.strip('_')).rstrip(' .')}.xlsx"

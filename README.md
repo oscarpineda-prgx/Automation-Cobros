@@ -108,6 +108,27 @@ Opciones utiles:
 python main.py cpa-request-download --rfc "RFC_DEL_PROVEEDOR" --start-year 2020 --end-year 2024 --poll-seconds 20 --max-wait-minutes 30
 ```
 
+Procesar proveedores desde `vendor_master_fechas.xlsx` en lotes de 50:
+
+```powershell
+python main.py cpa-batch-vendors --input vendor_master_fechas.xlsx --batch-size 50 --start-index 0 --download-dir outputs\cpa_vision --parquet-dir outputs\cpa_vision\parquet --browser-channel msedge --slow-mo-ms 700
+```
+
+Para el siguiente lote usar `--start-index 50`, luego `100`, etc. El comando
+genera un CSV de metricas con RFC, FECHAS, ID de solicitud, ZIP descargado,
+tiempo total y errores si los hubo, y además escribe el dataset Parquet
+particionado bajo `--parquet-dir` (por defecto, `outputs\cpa_vision\parquet`).
+
+Si ya tienes ZIP descargados y quieres convertirlos a Parquet sin volver a
+usar CPA Vision:
+
+```powershell
+python main.py cpa-zip-to-parquet --input outputs\cpa_vision\*.zip --output outputs\cpa_vision\parquet --rfc CLD0507145H6 --request-id 596778
+```
+Si CPA Vision se cierra durante un proveedor, el lote reabre sesion: si ya
+habia ID de solicitud, continua desde `Solicitudes`; si no, reintenta el
+proveedor desde cero.
+
 Para solo abrir la pagina sin marcar opciones:
 
 ```powershell

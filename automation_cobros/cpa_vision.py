@@ -1,13 +1,18 @@
 from __future__ import annotations
 
+import csv
 from dataclasses import dataclass
+from datetime import datetime
 import getpass
 from pathlib import Path
 import re
 import time
 from typing import Any
 
+import pandas as pd
+
 import config
+from automation_cobros.cpa_parquet import zip_to_parquet_dataset
 from automation_cobros.utils import ensure_parent, safe_filename
 
 try:
@@ -69,6 +74,14 @@ class CPAVisionSettings:
             timeout_ms=timeout_ms or 60_000,
             slow_mo_ms=slow_mo_ms or 0,
         )
+
+
+@dataclass(slots=True)
+class CPAVisionBatchJob:
+    source_index: int
+    rfc: str
+    fechas: str
+    years: tuple[int, ...]
 
 
 def run_manual_session(settings: CPAVisionSettings | None = None) -> list[Path]:
@@ -193,7 +206,7 @@ def request_download_and_wait(
     rfc: str | None = None,
     years: range | None = None,
     poll_seconds: int = 20,
-    max_wait_minutes: int = 30,
+    max_wait_minutes: int = 420,
     keep_open: bool = False,
 ) -> Path:
     """Create the CPA Vision CSV request and download the resulting ZIP."""
@@ -244,6 +257,9 @@ def request_download_and_wait(
                 settings.download_dir,
                 poll_seconds=poll_seconds,
                 max_wait_minutes=max_wait_minutes,
+                    settings=settings,
+                    username=username,
+                    password=password,
             )
             print(f"ZIP descargado: {output_path}", flush=True)
             if keep_open and not settings.headless:
@@ -256,6 +272,270 @@ def request_download_and_wait(
             browser.close()
 
 
+def request_vendor_master_batch(
+    settings: CPAVisionSettings | None = None,
+    *,
+    vendor_master_path: Path | str,
+    username: str | None = None,
+    password: str | None = None,
+    batch_size: int = 50,
+    start_index: int = 0,
+    poll_seconds: int = 20,
+    max_wait_minutes: int = 420,
+    metrics_path: Path | str | None = None,
+    parquet_dir: Path | str | None = None,
+    continue_on_error: bool = True,
+    keep_open: bool = False,
+) -> Path:
+    """Process a vendor master Excel in sequential CPA Vision download batches."""
+    _require_playwright()
+    settings = settings or CPAVisionSettings()
+    username = username or config.CPA_VISION_USER
+    password = password or config.CPA_VISION_PASSWORD
+    if batch_size <= 0:
+        raise ValueError("batch_size debe ser mayor que cero.")
+    if start_index < 0:
+        raise ValueError("start_index no puede ser negativo.")
+    jobs = _load_vendor_master_jobs(vendor_master_path)
+    selected_jobs = jobs[start_index : start_index + batch_size]
+    if not selected_jobs:
+        raise ValueError("No hay proveedores para procesar con los parametros indicados.")
+
+    settings.download_dir.mkdir(parents=True, exist_ok=True)
+    ensure_parent(settings.state_path)
+    metrics_file = Path(metrics_path) if metrics_path else _default_batch_metrics_path(settings.download_dir)
+    parquet_root = Path(parquet_dir) if parquet_dir else settings.download_dir / "parquet"
+
+    with sync_playwright() as playwright:
+        browser = None
+        context = None
+        page = None
+
+        try:
+            if not username:
+                username = input("Usuario CPA Vision: ").strip()
+            if not password:
+                password = getpass.getpass("Password CPA Vision: ")
+            if not username or not password:
+                raise ValueError("Usuario y password son requeridos para iniciar sesion en CPA Vision.")
+
+            browser, context, page = _start_authenticated_downloads_session(
+                playwright,
+                settings,
+                username,
+                password,
+            )
+            context.storage_state(path=str(settings.state_path))
+
+            total = len(selected_jobs)
+            for position, job in enumerate(selected_jobs, start=1):
+                started_at = datetime.now()
+                started_monotonic = time.monotonic()
+                request_id = ""
+                output_path: Path | None = None
+                parquet_rows = 0
+                parquet_files = 0
+                status = "downloaded"
+                error = ""
+                recovered = False
+
+                _log_step(
+                    f"Lote CPA {position}/{total}: RFC {job.rfc}, anos {', '.join(map(str, job.years))}"
+                )
+
+                for attempt in range(1, 3):
+                    try:
+                        if request_id:
+                            recovered = True
+                            _log_step(f"Recuperando solicitud ya creada {request_id}")
+                            browser, context, page = _restart_authenticated_downloads_session(
+                                playwright,
+                                settings,
+                                username,
+                                password,
+                                browser,
+                            )
+                            output_path = _wait_for_request_zip(
+                                page,
+                                request_id,
+                                settings.download_dir,
+                                poll_seconds=poll_seconds,
+                                max_wait_minutes=max_wait_minutes,
+                                settings=settings,
+                                username=username,
+                                password=password,
+                            )
+                            parquet_result = zip_to_parquet_dataset(
+                                output_path,
+                                parquet_root,
+                                rfc=job.rfc,
+                                request_id=request_id,
+                            )
+                            parquet_rows = parquet_result.rows
+                            parquet_files = parquet_result.files
+                            _return_to_downloads_form(page, settings.timeout_ms)
+                            status = "downloaded_after_recovery"
+                            error = ""
+                            break
+
+                        if attempt > 1:
+                            recovered = True
+                            _log_step(f"Reintentando proveedor {job.rfc} desde cero")
+                            browser, context, page = _restart_authenticated_downloads_session(
+                                playwright,
+                                settings,
+                                username,
+                                password,
+                                browser,
+                            )
+
+                        _return_to_downloads_form(page, settings.timeout_ms)
+                        _configure_default_download_options(page, rfc=job.rfc, years=job.years)
+                        request_id = _submit_download_request(page, settings.timeout_ms)
+                        context.storage_state(path=str(settings.state_path))
+                        output_path = _wait_for_request_zip(
+                            page,
+                            request_id,
+                            settings.download_dir,
+                            poll_seconds=poll_seconds,
+                            max_wait_minutes=max_wait_minutes,
+                            settings=settings,
+                            username=username,
+                            password=password,
+                        )
+                        parquet_result = zip_to_parquet_dataset(
+                            output_path,
+                            parquet_root,
+                            rfc=job.rfc,
+                            request_id=request_id,
+                        )
+                        parquet_rows = parquet_result.rows
+                        parquet_files = parquet_result.files
+                        _return_to_downloads_form(page, settings.timeout_ms)
+                        status = "downloaded_after_recovery" if recovered else "downloaded"
+                        error = ""
+                        break
+                    except Exception as exc:
+                        error = str(exc)
+                        _save_debug_artifacts(page, f"cpavision_batch_error_{job.source_index}_{job.rfc}")
+                        if attempt < 2:
+                            if request_id:
+                                _log_step(
+                                    f"Fallo despues de crear solicitud {request_id}. "
+                                    "Se reabrira CPA Vision para descargarla."
+                                )
+                            else:
+                                _log_step(
+                                    f"Fallo antes de crear solicitud para {job.rfc}. "
+                                    "Se reabrira CPA Vision y se reintentara desde cero."
+                                )
+                            continue
+                        status = "error"
+                        if not continue_on_error:
+                            _append_batch_metric(
+                                metrics_file,
+                                _build_batch_metric(
+                                    job,
+                                    position,
+                                    started_at,
+                                    started_monotonic,
+                                    request_id=request_id,
+                                    output_path=output_path,
+                                    parquet_root=parquet_root,
+                                    parquet_rows=parquet_rows,
+                                    parquet_files=parquet_files,
+                                    status=status,
+                                    error=error,
+                                ),
+                            )
+                            raise
+                        try:
+                            browser, context, page = _restart_authenticated_downloads_session(
+                                playwright,
+                                settings,
+                                username,
+                                password,
+                                browser,
+                            )
+                        except Exception as restart_exc:
+                            _log_step(f"No se pudo reabrir CPA Vision despues del error: {restart_exc}")
+
+                _append_batch_metric(
+                    metrics_file,
+                    _build_batch_metric(
+                        job,
+                        position,
+                        started_at,
+                        started_monotonic,
+                        request_id=request_id,
+                        output_path=output_path,
+                        parquet_root=parquet_root,
+                        parquet_rows=parquet_rows,
+                        parquet_files=parquet_files,
+                        status=status,
+                        error=error,
+                    ),
+                )
+
+            print(f"Metricas CPA Vision: {metrics_file}", flush=True)
+            if keep_open and not settings.headless:
+                input("Presiona Enter para cerrar el navegador...")
+            return metrics_file
+        except Exception:
+            if page is not None:
+                _save_debug_artifacts(page, "cpavision_batch_error")
+            raise
+        finally:
+            _close_browser_quietly(browser)
+
+
+def _start_authenticated_downloads_session(
+    playwright,
+    settings: CPAVisionSettings,
+    username: str,
+    password: str,
+):
+    _log_step(f"Abriendo navegador: {settings.browser_channel or 'chromium'}")
+    browser = _launch_browser(playwright, settings)
+    context_kwargs: dict[str, Any] = {"accept_downloads": True, "locale": _BROWSER_LOCALE}
+    if settings.state_path.exists():
+        _log_step(f"Reutilizando sesion guardada: {settings.state_path}")
+        context_kwargs["storage_state"] = str(settings.state_path)
+    context = browser.new_context(**context_kwargs)
+    context.set_default_timeout(settings.timeout_ms)
+    page = context.new_page()
+
+    _log_step(f"Abriendo CPA Vision: {settings.base_url}")
+    page.goto(settings.base_url, wait_until="domcontentloaded")
+    _dismiss_transient_overlays(page)
+    if not _is_empresa_or_downloads_page(page):
+        _login(page, username, password, settings.timeout_ms)
+    _open_descargas(page, settings.timeout_ms)
+    context.storage_state(path=str(settings.state_path))
+    return browser, context, page
+
+
+def _restart_authenticated_downloads_session(
+    playwright,
+    settings: CPAVisionSettings,
+    username: str,
+    password: str,
+    browser,
+):
+    _log_step("Reabriendo CPA Vision para continuar el lote")
+    _close_browser_quietly(browser)
+    return _start_authenticated_downloads_session(playwright, settings, username, password)
+
+
+def _close_browser_quietly(browser) -> None:
+    if browser is None:
+        return
+    try:
+        browser.close()
+    except Exception:
+        return
+
+
 def wait_for_existing_request_download(
     settings: CPAVisionSettings | None = None,
     *,
@@ -263,7 +543,7 @@ def wait_for_existing_request_download(
     username: str | None = None,
     password: str | None = None,
     poll_seconds: int = 20,
-    max_wait_minutes: int = 30,
+    max_wait_minutes: int = 420,
     keep_open: bool = False,
 ) -> Path:
     """Open CPA Vision requests and download a previously created request."""
@@ -308,6 +588,9 @@ def wait_for_existing_request_download(
                 settings.download_dir,
                 poll_seconds=poll_seconds,
                 max_wait_minutes=max_wait_minutes,
+                    settings=settings,
+                    username=username,
+                    password=password,
             )
             print(f"ZIP descargado: {output_path}", flush=True)
             if keep_open and not settings.headless:
@@ -1094,11 +1377,28 @@ def _wait_for_request_zip(
     *,
     poll_seconds: int,
     max_wait_minutes: int,
+    settings: CPAVisionSettings | None = None,
+    username: str | None = None,
+    password: str | None = None,
 ) -> Path:
     _open_solicitudes(page)
     deadline = time.monotonic() + max_wait_minutes * 60
     attempt = 1
     while True:
+        # Validación proactiva de sesión activa.
+        # Si la URL ya no pertenece al área de descarga masiva (fue redirigido a login/okta),
+        # intentamos recuperar la sesión antes de continuar.
+        if not _is_empresa_or_downloads_page(page) and username and password and settings:
+            _log_step("Sesion cerrada o redirigida durante la espera. Re-autenticando...")
+            try:
+                page.goto(settings.base_url, wait_until="domcontentloaded")
+                _dismiss_transient_overlays(page)
+                _login(page, username, password, settings.timeout_ms)
+                _open_solicitudes(page)
+            except Exception as e:
+                _log_step(f"Fallo el intento de recuperacion de sesion: {e}")
+                # No lanzamos error aquí para permitir que el flujo normal intente el reload()
+
         _log_step(f"Validando solicitud {request_id}. Intento {attempt}")
         page.reload(wait_until="domcontentloaded")
         page.wait_for_timeout(1_000)
@@ -1131,6 +1431,133 @@ def _wait_for_request_zip(
         _log_step(f"Aun no esta lista. Esperando {poll_seconds} segundos")
         page.wait_for_timeout(poll_seconds * 1_000)
         attempt += 1
+
+
+def _load_vendor_master_jobs(vendor_master_path: Path | str) -> list[CPAVisionBatchJob]:
+    path = Path(vendor_master_path)
+    if not path.exists():
+        raise FileNotFoundError(f"No se encontro el archivo vendor master: {path}")
+
+    df = pd.read_excel(path, dtype=str).fillna("")
+    normalized_columns = {str(column).strip().upper(): column for column in df.columns}
+    if "RFC" not in normalized_columns or "FECHAS" not in normalized_columns:
+        raise ValueError("El Excel debe tener las columnas RFC y FECHAS.")
+
+    rfc_column = normalized_columns["RFC"]
+    fechas_column = normalized_columns["FECHAS"]
+    jobs: list[CPAVisionBatchJob] = []
+    for row_index, row in df.iterrows():
+        rfc = str(row[rfc_column]).strip().upper()
+        fechas = str(row[fechas_column]).strip()
+        if not rfc and not fechas:
+            continue
+        if not rfc:
+            raise ValueError(f"Fila {row_index + 2}: RFC vacio.")
+        years = _parse_years(fechas)
+        jobs.append(
+            CPAVisionBatchJob(
+                source_index=row_index + 2,
+                rfc=rfc,
+                fechas=fechas,
+                years=years,
+            )
+        )
+    return jobs
+
+
+def _parse_years(value: str) -> tuple[int, ...]:
+    text = str(value).strip()
+    if not text:
+        raise ValueError("FECHAS esta vacio.")
+
+    compact = re.sub(r"\s+", "", text)
+    range_match = re.fullmatch(r"(\d{4})-(\d{4})", compact)
+    if range_match:
+        start_year = int(range_match.group(1))
+        end_year = int(range_match.group(2))
+        if start_year > end_year:
+            raise ValueError(f"Rango de FECHAS invalido: {text}")
+        return _validate_years(range(start_year, end_year + 1), text)
+
+    years = [int(match) for match in re.findall(r"\d{4}", compact)]
+    if years:
+        return _validate_years(years, text)
+    raise ValueError(f"No se pudo interpretar FECHAS: {text}")
+
+
+def _validate_years(years: Any, source: str) -> tuple[int, ...]:
+    unique_years = tuple(sorted(set(int(year) for year in years)))
+    unsupported = [year for year in unique_years if year < 2014 or year > 2026]
+    if unsupported:
+        raise ValueError(f"FECHAS contiene anos fuera de CPA Vision ({source}): {unsupported}")
+    return unique_years
+
+
+def _default_batch_metrics_path(download_dir: Path) -> Path:
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    return download_dir / f"cpa_batch_metrics_{timestamp}.csv"
+
+
+def _build_batch_metric(
+    job: CPAVisionBatchJob,
+    batch_position: int,
+    started_at: datetime,
+    started_monotonic: float,
+    *,
+    request_id: str,
+    output_path: Path | None,
+    parquet_root: Path,
+    parquet_rows: int,
+    parquet_files: int,
+    status: str,
+    error: str,
+) -> dict[str, str]:
+    finished_at = datetime.now()
+    elapsed_seconds = time.monotonic() - started_monotonic
+    return {
+        "batch_position": str(batch_position),
+        "excel_row": str(job.source_index),
+        "rfc": job.rfc,
+        "fechas": job.fechas,
+        "years": ",".join(str(year) for year in job.years),
+        "request_id": request_id,
+        "status": status,
+        "zip_path": str(output_path or ""),
+        "parquet_root": str(parquet_root),
+        "parquet_files": str(parquet_files),
+        "parquet_rows": str(parquet_rows),
+        "started_at": started_at.isoformat(timespec="seconds"),
+        "finished_at": finished_at.isoformat(timespec="seconds"),
+        "elapsed_seconds": f"{elapsed_seconds:.2f}",
+        "error": error,
+    }
+
+
+def _append_batch_metric(metrics_path: Path, row: dict[str, str]) -> None:
+    ensure_parent(metrics_path)
+    fieldnames = [
+        "batch_position",
+        "excel_row",
+        "rfc",
+        "fechas",
+        "years",
+        "request_id",
+        "status",
+        "zip_path",
+        "parquet_root",
+        "parquet_files",
+        "parquet_rows",
+        "started_at",
+        "finished_at",
+        "elapsed_seconds",
+        "error",
+    ]
+    write_header = not metrics_path.exists()
+    with metrics_path.open("a", newline="", encoding="utf-8-sig") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        if write_header:
+            writer.writeheader()
+        writer.writerow(row)
 
 
 def _find_request_row(page, request_id: str, timeout_ms: int):
@@ -1194,6 +1621,91 @@ def _open_solicitudes(page) -> None:
     except Exception:
         page.locator("table").first.wait_for(timeout=20_000)
     _dismiss_transient_overlays(page)
+
+
+def _return_to_downloads_form(page, timeout_ms: int) -> None:
+    _dismiss_transient_overlays(page)
+    _close_visible_modal(page)
+    if re.search(r"descarga-masiva/descargas", page.url, re.IGNORECASE):
+        page.get_by_text(re.compile("descarga masiva de archivos", re.IGNORECASE)).wait_for(timeout=timeout_ms)
+        _dismiss_transient_overlays(page)
+        return
+
+    _log_step("Regresando al formulario de Descarga masiva")
+    try:
+        _click_first_visible(
+            page,
+            [
+                lambda: page.get_by_role("button", name=re.compile("regresar", re.IGNORECASE)),
+                lambda: page.locator("button").filter(has_text=re.compile("regresar", re.IGNORECASE)),
+                lambda: page.get_by_text(re.compile(r"^\s*regresar\s*$", re.IGNORECASE)),
+            ],
+            "Regresar",
+        )
+        page.wait_for_url(re.compile(r".*descarga-masiva/descargas.*"), timeout=timeout_ms)
+    except Exception:
+        page.goto(_downloads_url_from_current_page(page), wait_until="domcontentloaded")
+    page.get_by_text(re.compile("descarga masiva de archivos", re.IGNORECASE)).wait_for(timeout=timeout_ms)
+    _dismiss_transient_overlays(page)
+
+
+def _downloads_url_from_current_page(page) -> str:
+    match = re.match(r"^(https?://[^/]+)", page.url)
+    if not match:
+        return "https://facreview.cpavision.mx/descarga-masiva/descargas"
+    return f"{match.group(1)}/descarga-masiva/descargas"
+
+
+def _close_visible_modal(page) -> bool:
+    try:
+        page.keyboard.press("Escape")
+        page.wait_for_timeout(200)
+    except Exception:
+        pass
+
+    result = page.evaluate(
+        """
+        () => {
+            const isVisible = (el) => {
+                if (!el) return false;
+                const style = window.getComputedStyle(el);
+                if (style.visibility === "hidden" || style.display === "none") return false;
+                const rect = el.getBoundingClientRect();
+                return rect.width > 0 && rect.height > 0;
+            };
+
+            const closeTerms = /(cerrar|close|dismiss|times|remove|cancel|x)/i;
+            const modalCandidates = Array.from(document.querySelectorAll(
+                ".modal, .modal-dialog, [role='dialog'], .swal2-popup, .mat-dialog-container"
+            )).filter(isVisible);
+            if (!modalCandidates[0]) return false;
+            const root = modalCandidates[0];
+            const buttons = Array.from(root.querySelectorAll("button, a, [role='button'], span, i"))
+                .filter(isVisible)
+                .map((el) => {
+                    const rect = el.getBoundingClientRect();
+                    const attrs = [
+                        el.innerText,
+                        el.textContent,
+                        el.getAttribute("aria-label"),
+                        el.getAttribute("title"),
+                        el.getAttribute("class"),
+                        el.id,
+                    ].join(" ");
+                    return { el, rect, attrs };
+                })
+                .filter((item) => closeTerms.test(item.attrs) || String(item.attrs || "").includes("×"))
+                .sort((a, b) => (a.rect.top - b.rect.top) || (b.rect.right - a.rect.right));
+            if (!buttons[0]) return false;
+            buttons[0].el.click();
+            return true;
+        }
+        """
+    )
+    if result:
+        _log_step("Modal visible cerrado")
+        page.wait_for_timeout(300)
+    return bool(result)
 
 
 def _first_ready_request_link(row):
@@ -1433,7 +1945,7 @@ def _click_first_visible(page, locator_factories, description: str) -> None:
 
 def _is_empresa_or_downloads_page(page) -> bool:
     current_url = page.url.lower()
-    return "okta/empresas" in current_url or "descarga-masiva/descargas" in current_url
+    return "okta/empresas" in current_url or "descarga-masiva" in current_url
 
 
 def _log_step(message: str) -> None:

@@ -1,54 +1,57 @@
+"""Generación del Excel de Compras.
+
+Escribe con **xlsxwriter** y en modo `constant_memory`, que serializa las filas al vuelo
+en streaming. openpyxl tardaba minutos en guardar cientos de miles de filas (la
+serialización XML es su cuello de botella); xlsxwriter lo hace en segundos.
+
+Las columnas que antes eran fórmulas vivas de Excel ahora se calculan como **valores** en
+Python (`apply_display_formula_values`). Eso quita el tope del VLOOKUP y evita que Excel se
+congele al abrir archivos con millones de fórmulas. Si el auditor edita algo, recalcula con
+el botón "Recalcular" (que corre en Python).
+"""
+
 from __future__ import annotations
 
+import math
 from pathlib import Path
-from typing import Iterable
 
+import numpy as np
 import pandas as pd
-import config
-from openpyxl import Workbook
-from openpyxl.drawing.image import Image as XLImage
-from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
-from openpyxl.utils import get_column_letter
+import xlsxwriter
 
+import config
 from automation_cobros.calculations import (
     COMPRAS_COLUMNS,
     EDI_COLUMNS,
+    apply_display_formula_values,
     build_pending_edi_dataframe,
     prepare_compras_dataframe,
 )
 from automation_cobros.utils import ensure_parent
 
+HEADER_ROW = 6  # 0-indexed (fila 7 en Excel)
+DATA_ROW = 7  # 0-indexed (fila 8 en Excel)
+SHEET_ROW_LIMIT = 1_048_576  # tope duro de filas por hoja en Excel
 
-HEADER_ROW = 7
-DATA_ROW = 8
+# Arriba de este numero de renglones, el Compras se parte en UN ARCHIVO POR AÑO
+# (Compras_<base>_2020.xlsx, ...) en vez de un solo archivo gigante. Los proveedores
+# chicos siguen en un unico archivo con hojas por año. Decision de Oscar (2026-07-24).
+UMBRAL_PARTIR_POR_ANIO = 1_000_000
 
-TITLE_FILL = PatternFill("solid", fgColor="1F4E78")
-HEADER_FILL = PatternFill("solid", fgColor="FF00FD28")
-FORMULA_FILL = PatternFill("solid", fgColor="FFFFFF00")
-EDI_FILL = PatternFill("solid", fgColor="FFF2CC")
-AUDIT_FILL = PatternFill("solid", fgColor="E2F0D9")
-PENDING_FILL = PatternFill("solid", fgColor="FCE4D6")
-WHITE_FONT = Font(color="FFFFFF", bold=True)
-HEADER_FONT = Font(color="FF000000", bold=True)
-TITLE_FONT = Font(color="FF000000", bold=True, size=14)
-THIN_BORDER = Border(
-    left=Side(style="thin", color="D9E2F3"),
-    right=Side(style="thin", color="D9E2F3"),
-    top=Side(style="thin", color="D9E2F3"),
-    bottom=Side(style="thin", color="D9E2F3"),
-)
+_HEADER_BG = "#00FD28"
+_AUDIT_BG = "#E2F0D9"
+_EDI_BG = "#FFF2CC"
+_TITLE_COLOR = "#000000"
 
-FORMULA_COLUMNS = {
-    "concaten",
-    "fante",
-    "facdecto",
-    "ctouni_sistema",
-    "ctontol",
-    "impaud",
-    "dpagar",
-    "imp",
-    "dif cto fac ctouni",
-    "ctontopza",
+_AUDIT_COLS = frozenset({
+    "cto_aud", "iva_aud", "ieps_aud", "imp_aud",
+    "debio_pagar_ne", "dif_det_ne", "debio_pagar_inv", "tot_pagado_inv", "dif_det_inv",
+})
+
+_WIDTHS = {
+    "cnpj": 16, "vndnbr": 10, "vndname": 28, "ponbr": 14, "podt": 12,
+    "rcvnbr": 12, "rcvdt": 12, "strnbr": 12, "invnbr": 18, "itmdesc": 34,
+    "uuid": 36, "txt_cabec": 24, "txt_item": 24,
 }
 
 
@@ -58,212 +61,283 @@ def write_compras_workbook(
     vendor: str | None = None,
     start_date: str | None = None,
     end_date: str | None = None,
+    *,
+    already_prepared: bool = False,
 ) -> Path:
+    """Escribe el Compras. `already_prepared=True` evita recalcular `prepare_compras_dataframe`
+    cuando quien llama ya lo hizo (lo usa el pipeline para no preparar dos veces).
+
+    Con `already_prepared=True` el DataFrame recibido se **muta**: las columnas de fórmula
+    se calculan en sitio para no duplicar la tabla en proveedores de más de un millón de
+    renglones. Quien llama lo comparte a sabiendas (el pipeline reusa el mismo objeto para
+    la Validación, y ahí los valores de fórmula ya calculados son los correctos).
+    """
     output_path = Path(output_path)
     ensure_parent(output_path)
-
-    prepared = prepare_compras_dataframe(df)
-    wb = Workbook()
-    ws = wb.active
-    ws.title = "Compras"
-
-    _add_logo(ws)
-    _write_title(ws, prepared, vendor, start_date, end_date)
-    _write_dataframe(ws, prepared, COMPRAS_COLUMNS, HEADER_ROW)
-    _style_compras_sheet(ws, prepared)
-    _apply_formula_columns(ws, len(prepared))
-    _write_impaud_helper_sheet(wb, prepared)
-    _write_pending_sheet(wb, prepared)
-    _force_formula_recalculation(wb)
-
-    wb.save(output_path)
+    prepared = _preparar_para_escritura(df, already_prepared)
+    _escribir_libro(output_path, prepared, vendor, start_date, end_date)
     return output_path
 
 
-def _write_title(ws, df: pd.DataFrame, vendor: str | None, start_date: str | None, end_date: str | None) -> None:
-    vendor_name = ""
-    if "vndname" in df.columns and not df.empty:
-        vendor_name = str(df["vndname"].dropna().iloc[0]) if df["vndname"].notna().any() else ""
-    vendor_code = vendor or (str(df["vndnbr"].dropna().iloc[0]) if "vndnbr" in df.columns and df["vndnbr"].notna().any() else "")
-    period = _period_label(start_date, end_date)
+def write_compras_files(
+    df: pd.DataFrame,
+    proveedor_dir: Path,
+    base: str,
+    vendor: str | None = None,
+    start_date: str | None = None,
+    end_date: str | None = None,
+    *,
+    already_prepared: bool = False,
+) -> list[Path]:
+    """Escribe el/los Compras de un proveedor y devuelve las rutas escritas.
 
-    ws.merge_cells(start_row=2, start_column=4, end_row=2, end_column=12)
-    ws.merge_cells(start_row=3, start_column=4, end_row=3, end_column=12)
-    ws.merge_cells(start_row=4, start_column=4, end_row=4, end_column=12)
-    ws["D2"] = "Tiendas Soriana, S.A. de C.V."
-    ws["D3"] = f"{vendor_code} - {vendor_name}".strip(" -")
-    ws["D4"] = f"Compras Periodo {period}"
-    for cell in ["D2", "D3", "D4"]:
-        ws[cell].font = TITLE_FONT
-        ws[cell].alignment = Alignment(horizontal="center")
-    for row_idx in range(2, 5):
-        ws.row_dimensions[row_idx].height = 21
+    - Proveedor chico (hasta `UMBRAL_PARTIR_POR_ANIO` renglones): **un solo archivo**
+      `Compras_<base>.xlsx` con una hoja por año.
+    - Proveedor grande: **un archivo por año**, `Compras_<base>_2020.xlsx`, ..., cada uno
+      con su propio `Pendientes_EDI` de ese año. Se corta en limites de año, asi que una
+      nota de entrada (un recibo, una fecha) nunca queda partida entre archivos: esto es
+      solo como se reparte la salida, no cambia ningun calculo.
+    """
+    proveedor_dir = Path(proveedor_dir)
+    proveedor_dir.mkdir(parents=True, exist_ok=True)
+    prepared = _preparar_para_escritura(df, already_prepared)
+
+    if len(prepared) <= UMBRAL_PARTIR_POR_ANIO:
+        ruta = proveedor_dir / f"Compras_{base}.xlsx"
+        _escribir_libro(ruta, prepared, vendor, start_date, end_date)
+        return [ruta]
+
+    rutas: list[Path] = []
+    for etiqueta, posiciones in _grupos_por_anio(prepared):
+        sufijo = etiqueta if etiqueta is not None else "sin_fecha"
+        ruta = proveedor_dir / f"Compras_{base}_{sufijo}.xlsx"
+        _escribir_libro(ruta, prepared.take(posiciones), vendor, start_date, end_date)
+        rutas.append(ruta)
+    return rutas
+
+
+def _preparar_para_escritura(df: pd.DataFrame, already_prepared: bool) -> pd.DataFrame:
+    """Deja el DataFrame con las 105 columnas y los valores de formula ya calculados."""
+    prepared = df if already_prepared else prepare_compras_dataframe(df)
+    prepared = apply_display_formula_values(prepared, en_sitio=already_prepared)
+    if list(prepared.columns) != COMPRAS_COLUMNS:
+        prepared = prepared[COMPRAS_COLUMNS]
+    return prepared
+
+
+def escribir_libro_compras(
+    output_path: Path,
+    prepared_display: pd.DataFrame,
+    vendor: str | None = None,
+    start_date: str | None = None,
+    end_date: str | None = None,
+) -> Path:
+    """Escribe UN .xlsx de Compras a partir de un DataFrame **ya preparado y con los valores
+    de fórmula aplicados** (no vuelve a prepararlo ni a aplicar `apply_display_formula_values`).
+
+    Lo usa el pipeline por intervalos (proveedores grandes), que prepara cada año por
+    separado y ya trae los valores de fórmula calculados. Reutiliza exactamente la misma
+    escritura de hojas por año + Pendientes_EDI que el camino normal."""
+    output_path = Path(output_path)
+    if list(prepared_display.columns) != COMPRAS_COLUMNS:
+        prepared_display = prepared_display[COMPRAS_COLUMNS]
+    _escribir_libro(output_path, prepared_display, vendor, start_date, end_date)
+    return output_path
+
+
+def _escribir_libro(output_path, prepared, vendor, start_date, end_date) -> None:
+    """Abre un .xlsx y escribe las hojas de Compras (por año) + `Pendientes_EDI` del
+    `prepared` dado. Si algo falla, borra el archivo trunco en vez de dejar una salida
+    a medias que parezca buena."""
+    output_path = Path(output_path)
+    ensure_parent(output_path)
+    pending = build_pending_edi_dataframe(prepared)
+
+    # use_zip64: el Compras de un proveedor de más de un millón de renglones rebasa los
+    # límites del ZIP clásico y xlsxwriter aborta con FileSizeError al cerrar el libro.
+    wb = xlsxwriter.Workbook(str(output_path), {"constant_memory": True, "use_zip64": True})
+    try:
+        _write_compras_sheets(wb, prepared, vendor, start_date, end_date)
+        _write_pending_sheet(wb, pending)
+        wb.close()
+    except BaseException:
+        try:
+            wb.close()
+        except BaseException:
+            pass
+        output_path.unlink(missing_ok=True)
+        raise
+
+
+def _write_compras_sheets(wb, df, vendor, start_date, end_date) -> None:
+    """Escribe el Compras con **una hoja por año** (segun `rcvdt`): "Compras 2020",
+    "Compras 2021", ...
+
+    Si un año pasa del tope de filas de Excel, ese año se parte en "Compras 2020 (2)", etc.
+    Cada renglon se conserva: nada se descarta en silencio. La primera hoja lleva el
+    titulo/logo; las demas solo encabezado y datos.
+
+    El agrupado por año es **solo presentacion**: reordena en que hoja cae cada renglon,
+    pero no cambia ningun valor calculado (los calculos ya vienen hechos por renglon y por
+    grupo). El reparto de los renglones sin fecha se explica en `_anio_agrupacion`.
+    """
+    capacidad = SHEET_ROW_LIMIT - DATA_ROW  # filas de datos que caben tras titulo + encabezado
+    if not len(df):
+        _write_compras_sheet(wb, df, vendor, start_date, end_date, name="Compras", with_title=True)
+        return
+
+    primero = True
+    for etiqueta, posiciones in _grupos_por_anio(df):
+        grupo = df.take(posiciones)  # .take respeta el orden original de las filas
+        partes = max(1, math.ceil(len(grupo) / capacidad))
+        for parte in range(partes):
+            chunk = grupo.iloc[parte * capacidad:(parte + 1) * capacidad] if partes > 1 else grupo
+            base = "Compras" if etiqueta is None else f"Compras {etiqueta}"
+            # 1er pedazo sin sufijo ("Compras 2020"); los siguientes "(2)", "(3)"...
+            nombre = base if parte == 0 else f"{base} ({parte + 1})"
+            _write_compras_sheet(
+                wb, chunk, vendor, start_date, end_date, name=nombre, with_title=primero
+            )
+            primero = False
+
+
+def _grupos_por_anio(df):
+    """Genera pares (etiqueta_de_año, posiciones) en orden de año ascendente.
+
+    `posiciones` son indices posicionales (0..n-1) en el orden original de `df`, de modo
+    que dentro de cada hoja las filas quedan como venian. La etiqueta es el año como texto,
+    o `None` si —caso extremo, sin ninguna fecha en todo el proveedor— no se pudo
+    determinar el año y todo va a una sola hoja "Compras".
+    """
+    anio = _anio_agrupacion(df).to_numpy()
+    conocido = ~np.isnan(anio)
+    for valor in sorted(np.unique(anio[conocido])):
+        yield str(int(valor)), np.flatnonzero(anio == valor)
+    resto = np.flatnonzero(~conocido)
+    if resto.size:
+        yield None, resto
+
+
+def _anio_agrupacion(df) -> pd.Series:
+    """Año de agrupacion de cada renglon, a partir de `rcvdt`.
+
+    Los renglones sin fecha (NaT) **no** van a una hoja aparte: se les asigna el año de su
+    MISMO grupo, para que caigan junto a los que les corresponden. En orden de preferencia:
+
+    1. Por nota de entrada (`concaten`): una nota de entrada es un solo recibo con una sola
+       fecha, asi que es la mejor coincidencia.
+    2. Por factura (`invnbr`): si la nota de entrada no bastara.
+    3. Por la fila vecina en el orden original (ffill/bfill), como ultimo recurso.
+
+    Asi ningun renglon se pierde ni se aisla, y como esto solo decide en que hoja se
+    muestra, no afecta ningun calculo.
+    """
+    if "rcvdt" not in df.columns:
+        return pd.Series(np.nan, index=df.index, dtype="float64")
+
+    anio = pd.to_datetime(df["rcvdt"], errors="coerce").dt.year.astype("float64")
+    for clave in ("concaten", "invnbr"):
+        if not anio.isna().any():
+            break
+        if clave in df.columns:
+            anio = anio.fillna(anio.groupby(df[clave]).transform("first"))
+    if anio.isna().any():
+        anio = anio.ffill().bfill()
+    return anio
+
+
+def _write_compras_sheet(
+    wb, df, vendor, start_date, end_date, *, name="Compras", with_title=True
+) -> None:
+    ws = wb.add_worksheet(name)
+    ws.hide_gridlines(2)
+    ws.freeze_panes(DATA_ROW, 0)
+
+    title = wb.add_format({"bold": True, "font_size": 14, "align": "center", "font_color": _TITLE_COLOR})
+    hdr = wb.add_format({"bold": True, "bg_color": _HEADER_BG, "border": 1, "align": "center", "valign": "vcenter", "text_wrap": True})
+    hdr_edi = wb.add_format({"bold": True, "bg_color": _EDI_BG, "border": 1, "align": "center", "valign": "vcenter", "text_wrap": True})
+    hdr_aud = wb.add_format({"bold": True, "bg_color": _AUDIT_BG, "border": 1, "align": "center", "valign": "vcenter", "text_wrap": True})
+
+    # Logo + titulo (solo en la primera hoja)
+    if with_title:
+        _add_logo(ws)
+        vendor_name = _first(df, "vndname")
+        vendor_code = vendor or _first(df, "vndnbr")
+        ws.merge_range(1, 3, 1, 11, "Tiendas Soriana, S.A. de C.V.", title)
+        ws.merge_range(2, 3, 2, 11, f"{vendor_code} - {vendor_name}".strip(" -"), title)
+        ws.merge_range(3, 3, 3, 11, f"Compras Periodo {_period_label(start_date, end_date)}", title)
+
+    # Encabezados de columna (con resaltado EDI/auditoria)
+    for col_idx, column in enumerate(COMPRAS_COLUMNS):
+        formato = hdr_edi if column in EDI_COLUMNS else hdr_aud if column in _AUDIT_COLS else hdr
+        ws.write(HEADER_ROW, col_idx, column, formato)
+        ws.set_column(col_idx, col_idx, _WIDTHS.get(column, 13))
+
+    # Datos como valores, en streaming.
+    _write_rows(ws, df, start_row=DATA_ROW)
+
+    if len(df):
+        ws.autofilter(HEADER_ROW, 0, HEADER_ROW + len(df), len(COMPRAS_COLUMNS) - 1)
+
+
+def _write_pending_sheet(wb, pending) -> None:
+    ws = wb.add_worksheet("Pendientes_EDI")
+    ws.hide_gridlines(2)
+    aviso = wb.add_format({"bold": True, "font_color": "#9C5700"})
+    ws.write(0, 0, "Registros con campos EDI vacios para complemento manual o CPA Vision", aviso)
+
+    if pending is None or pending.empty:
+        ws.write(2, 0, "No se detectaron pendientes EDI.")
+        ws.set_column(0, 0, 80)
+        return
+
+    # Si el pendiente rebasa el tope de Excel, lo recortamos con aviso visible
+    # (no lo dejamos caer en silencio).
+    capacidad = SHEET_ROW_LIMIT - 3
+    if len(pending) > capacidad:
+        ws.write(
+            1, 0,
+            f"AVISO: {len(pending):,} pendientes; se muestran los primeros {capacidad:,} "
+            "por el tope de Excel.",
+            aviso,
+        )
+        pending = pending.iloc[:capacidad]
+
+    hdr = wb.add_format({"bold": True, "bg_color": _HEADER_BG, "border": 1})
+    for col_idx, column in enumerate(pending.columns):
+        ws.write(2, col_idx, str(column), hdr)
+        ws.set_column(col_idx, col_idx, max(12, min(36, len(str(column)) + 4)))
+    _write_rows(ws, pending, start_row=3)
+    ws.freeze_panes(3, 0)
+    ws.autofilter(2, 0, 2 + len(pending), len(pending.columns) - 1)
+
+
+def _write_rows(ws, df: pd.DataFrame, *, start_row: int) -> None:
+    """Escribe los valores del DataFrame fila por fila, saneando NaN a celda vacía."""
+    for offset, row in enumerate(df.itertuples(index=False, name=None)):
+        ws.write_row(start_row + offset, 0, [_clean(v) for v in row])
+
+
+def _clean(value):
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return None
+    if isinstance(value, pd.Timestamp):
+        return value.strftime("%Y-%m-%d")
+    if hasattr(value, "isoformat"):  # datetime/date
+        return value.isoformat()[:10]
+    return value
 
 
 def _add_logo(ws) -> None:
     logo_path = config.BASE_DIR / "templates" / "Soriana-Logo.png"
-    if not logo_path.exists():
-        return
-    logo = XLImage(str(logo_path))
-    logo.width = 190
-    logo.height = 46
-    ws.add_image(logo, "A2")
+    if logo_path.exists():
+        ws.insert_image(1, 0, str(logo_path), {"x_scale": 0.5, "y_scale": 0.5})
 
 
-def _write_dataframe(ws, df: pd.DataFrame, columns: Iterable[str], header_row: int) -> None:
-    ws.row_dimensions[header_row].height = 20
-    for col_idx, column in enumerate(columns, start=1):
-        cell = ws.cell(header_row, col_idx, column)
-        cell.font = HEADER_FONT
-        cell.fill = HEADER_FILL
-        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-        cell.border = THIN_BORDER
-
-    for row_idx, row in enumerate(df.itertuples(index=False), start=header_row + 1):
-        for col_idx, value in enumerate(row, start=1):
-            cell = ws.cell(row_idx, col_idx, _excel_value(value))
-            cell.border = THIN_BORDER
-
-
-def _style_compras_sheet(ws, df: pd.DataFrame) -> None:
-    ws.freeze_panes = "A8"
-    last_col = get_column_letter(len(COMPRAS_COLUMNS))
-    last_row = HEADER_ROW + max(len(df), 1)
-    ws.auto_filter.ref = f"A{HEADER_ROW}:{last_col}{last_row}"
-    ws.sheet_view.showGridLines = False
-
-    column_index = {column: idx for idx, column in enumerate(COMPRAS_COLUMNS, start=1)}
-    for edi_col in EDI_COLUMNS:
-        if edi_col in column_index:
-            ws.cell(HEADER_ROW, column_index[edi_col]).fill = HEADER_FILL
-            ws.cell(HEADER_ROW, column_index[edi_col]).font = HEADER_FONT
-
-    for audit_col in [
-        "cto_aud",
-        "iva_aud",
-        "ieps_aud",
-        "imp_aud",
-        "debio_pagar_ne",
-        "dif_det_ne",
-        "debio_pagar_inv",
-        "tot_pagado_inv",
-        "dif_det_inv",
-    ]:
-        if audit_col in column_index:
-            ws.cell(HEADER_ROW, column_index[audit_col]).fill = HEADER_FILL
-            ws.cell(HEADER_ROW, column_index[audit_col]).font = HEADER_FONT
-
-    widths = {
-        "cnpj": 16,
-        "vndnbr": 10,
-        "vndname": 28,
-        "ponbr": 14,
-        "podt": 12,
-        "rcvnbr": 12,
-        "rcvdt": 12,
-        "strnbr": 12,
-        "invnbr": 18,
-        "itmdesc": 34,
-        "uuid": 36,
-        "txt_cabec": 24,
-        "txt_item": 24,
-    }
-    for idx, column in enumerate(COMPRAS_COLUMNS, start=1):
-        letter = get_column_letter(idx)
-        ws.column_dimensions[letter].width = widths.get(column, 13)
-        if column in _date_columns():
-            _set_number_format(ws, idx, "yyyy-mm-dd")
-        elif column in _money_columns():
-            _set_number_format(ws, idx, '#,##0.00')
-        elif column in _percent_columns():
-            _set_number_format(ws, idx, "0.00%")
-
-    for row in ws.iter_rows(min_row=DATA_ROW, max_row=DATA_ROW + len(df) - 1):
-        for cell in row:
-            cell.alignment = Alignment(vertical="center")
-
-
-def _apply_formula_columns(ws, row_count: int) -> None:
-    column_index = {column: idx for idx, column in enumerate(COMPRAS_COLUMNS, start=1)}
-    for column in FORMULA_COLUMNS:
-        col_idx = column_index[column]
-        header = ws.cell(HEADER_ROW, col_idx)
-        header.fill = FORMULA_FILL
-        header.font = HEADER_FONT
-
-    if row_count <= 0:
-        return
-
-    letters = {column: get_column_letter(idx) for column, idx in column_index.items()}
-    for row_idx in range(DATA_ROW, DATA_ROW + row_count):
-        formulas = {
-            "concaten": f"=CONCATENATE({letters['strnbr']}{row_idx},{letters['rcvnbr']}{row_idx})",
-            "fante": f"=({letters['canfac_edi']}{row_idx}*{letters['fact_empaq']}{row_idx})-{letters['can_rec']}{row_idx}",
-            "facdecto": f"=100-({letters['poitmnetcst']}{row_idx}/{letters['poitmgrscst']}{row_idx})*100",
-            "ctouni_sistema": f"=({letters['poitmgrscst']}{row_idx}/{letters['fact_empaq']}{row_idx})*(1-{letters['facdecto']}{row_idx}/100)",
-            "ctontol": f"=IF(AND({letters['ctonto_edi']}{row_idx}<{letters['ctouni_sistema']}{row_idx},{letters['ctonto_edi']}{row_idx}>0),{letters['ctonto_edi']}{row_idx},{letters['ctouni_sistema']}{row_idx})",
-            "impaud": f"=({letters['ctontol']}{row_idx}*{letters['can_rec']}{row_idx})*(1+{letters['imp']}{row_idx})",
-            "dpagar": f"=VLOOKUP({letters['concaten']}{row_idx},impaud!$A$3:$B$4779,2,0)",
-            "imp": "=0.16",
-            "dif cto fac ctouni": f"={letters['ctonto_edi']}{row_idx}-{letters['ctontol']}{row_idx}",
-            "ctontopza": f"={letters['ctonto_edi']}{row_idx}/{letters['fact_empaq']}{row_idx}",
-        }
-        for column, formula in formulas.items():
-            cell = ws.cell(row_idx, column_index[column])
-            cell.value = formula
-
-
-def _force_formula_recalculation(wb: Workbook) -> None:
-    wb.calculation.calcMode = "auto"
-    wb.calculation.fullCalcOnLoad = True
-    wb.calculation.forceFullCalc = True
-
-
-def _write_impaud_helper_sheet(wb: Workbook, df: pd.DataFrame) -> None:
-    ws = wb.create_sheet("impaud")
-    ws.sheet_state = "hidden"
-    ws["A2"] = "concaten"
-    ws["B2"] = "impaud"
-
-    if "concaten" not in df.columns or df.empty:
-        return
-
-    unique_keys = df["concaten"].dropna().astype(str).drop_duplicates().tolist()
-    max_lookup_rows = 4779 - 3 + 1
-    for offset, key in enumerate(unique_keys[:max_lookup_rows], start=3):
-        ws.cell(offset, 1, key)
-        ws.cell(offset, 2, f"=SUMIF(Compras!$D:$D,A{offset},Compras!$AO:$AO)")
-
-
-def _write_pending_sheet(wb: Workbook, df: pd.DataFrame) -> None:
-    pending = build_pending_edi_dataframe(df)
-    ws = wb.create_sheet("Pendientes_EDI")
-    ws["A1"] = "Registros con campos EDI vacios para complemento manual o futura automatizacion PMAIL/CPA Vision"
-    ws["A1"].font = Font(bold=True, color="9C5700")
-    if pending.empty:
-        ws["A3"] = "No se detectaron pendientes EDI."
-        ws.column_dimensions["A"].width = 80
-        return
-    _write_dataframe(ws, pending, list(pending.columns), 3)
-    for col_idx, column in enumerate(pending.columns, start=1):
-        ws.column_dimensions[get_column_letter(col_idx)].width = max(12, min(36, len(str(column)) + 4))
-        if column in _date_columns():
-            _set_number_format(ws, col_idx, "m/d/yyyy", min_row=4)
-    ws.freeze_panes = "A4"
-    ws.sheet_view.showGridLines = False
-    ws.auto_filter.ref = f"A3:{get_column_letter(len(pending.columns))}{3 + len(pending)}"
-
-
-def _excel_value(value):
-    if pd.isna(value):
-        return None
-    return value
-
-
-def _set_number_format(ws, col_idx: int, number_format: str, min_row: int = DATA_ROW) -> None:
-    for cell in ws.iter_cols(min_col=col_idx, max_col=col_idx, min_row=min_row):
-        for item in cell:
-            item.number_format = number_format
+def _first(df: pd.DataFrame, column: str) -> str:
+    if column in df.columns and df[column].notna().any():
+        return str(df[column].dropna().iloc[0])
+    return ""
 
 
 def _period_label(start_date: str | None, end_date: str | None) -> str:
@@ -279,37 +353,3 @@ def _period_label(start_date: str | None, end_date: str | None) -> str:
     if start and end and start != end:
         return f"{start}-{end}"
     return start or end
-
-
-def _date_columns() -> set[str]:
-    return {"podt", "rcvdt", "invdt", "paychkdt", "payinvdt", "invdt_ne", "paychkdt_ne"}
-
-
-def _money_columns() -> set[str]:
-    return {
-        "ctouni",
-        "ctouni_sistema",
-        "ctonto_edi",
-        "ctontopza",
-        "impart_edi",
-        "imieps_edi",
-        "impiva_edi",
-        "totfactura",
-        "cto_aud",
-        "imp_aud",
-        "debio_pagar_ne",
-        "dif_det_ne",
-        "debio_pagar_inv",
-        "tot_pagado_inv",
-        "dif_det_inv",
-        "paynetamt",
-        "tot_pagado_ne",
-        "compra_bruta",
-        "compra_bruta mas impuestos",
-        "compra_neta",
-        "compra neta mas impuestos",
-    }
-
-
-def _percent_columns() -> set[str]:
-    return {"prieps_edi", "poriva_edi", "ieps_t007s", "iva_t007s", "iva_aud", "ieps_aud"}
