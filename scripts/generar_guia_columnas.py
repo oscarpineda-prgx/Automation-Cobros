@@ -34,6 +34,14 @@ def _titulo(doc, texto, color=AZUL, size=15):
     return p
 
 
+def _parrafo_9(doc, texto, italic=False):
+    p = doc.add_paragraph()
+    r = p.add_run(texto)
+    r.font.size = Pt(9)
+    r.italic = italic
+    return p
+
+
 def _tabla(doc, encabezados, filas):
     t = doc.add_table(rows=1, cols=len(encabezados))
     t.style = "Light Grid Accent 1"
@@ -57,7 +65,7 @@ def main() -> None:
 
     h = doc.add_heading("Guía de columnas — Compras / Cruce CPA Vision", level=0)
     h.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    sub = doc.add_paragraph("Automation Cobros · PRGX · Soriana Audit Suite")
+    sub = doc.add_paragraph("Automation Costos · PRGX · Soriana Audit Suite")
     sub.alignment = WD_ALIGN_PARAGRAPH.CENTER
     doc.add_paragraph()
 
@@ -89,15 +97,65 @@ def main() -> None:
         doc,
         ["Concepto", "En Compras", "En CPA Vision", "Nota"],
         [
-            ["Número de factura", "invnbr", "Folio", "Se normaliza (quita serie/guiones): FN-21226 → 21226"],
-            ["Código de barras", "codbarra", "noIdentificacion", "Se leen solo dígitos; NO usar la columna upc"],
-            ["Proveedor", "vndnbr / cnpj (RFC)", "RFC (partición)", "El RFC se detecta solo desde el Compras"],
+            ["Proveedor", "cnpj (RFC)", "RFC (partición)", "El RFC se detecta solo, desde el propio Compras"],
+            ["Código de barras", "codbarra", "noIdentificacion", "Se leen solo dígitos, sin ceros iniciales; NO se usa la columna upc"],
+            ["Número de factura", "invnbr", "Serie + Folio", "invnbr trae la serie pegada y con formato irregular; se normaliza"],
         ],
     )
     doc.add_paragraph()
 
-    # 2. Copiadas del CFDI
-    _titulo(doc, "2. Columnas que se COPIAN del CFDI (CPA Vision)", AMARILLO, size=13)
+    _parrafo_9(
+        doc,
+        "El cruce se hace en DOS PASADAS, porque invnbr viene capturado de forma "
+        "inconsistente (conviven FN-21226, FN21226 y -21226 en el mismo proveedor):",
+    )
+    _tabla(
+        doc,
+        ["Pasada", "Llave", "Cómo se normaliza", "Ejemplo"],
+        [
+            [
+                "1ª — principal",
+                "código de barras + Serie+Folio",
+                "Mayúsculas, se quita todo lo que no sea letra o número (la serie SE CONSERVA)",
+                "FN-21226 → FN21226",
+            ],
+            [
+                "2ª — respaldo",
+                "código de barras + Folio",
+                "Solo los dígitos, sin ceros a la izquierda. Se aplica ÚNICAMENTE a los renglones que no cruzaron en la 1ª",
+                "FN-21226 → 21226",
+            ],
+        ],
+    )
+    _parrafo_9(
+        doc,
+        "El respaldo es más laxo (ignora la serie), por eso va en segundo lugar y solo sobre "
+        "lo que quedó sin cruzar. El riesgo de falso positivo queda acotado porque la búsqueda "
+        "ya va restringida por RFC y por código de barras.",
+        italic=True,
+    )
+    doc.add_paragraph()
+
+    # 1b. Reglas de seguridad del cruce
+    _titulo(doc, "2. Dos reglas de seguridad del cruce", size=13)
+    _tabla(
+        doc,
+        ["Regla", "Qué significa"],
+        [
+            [
+                "Solo rellena celdas VACÍAS",
+                "Si el Compras ya traía un dato en una columna EDI, el cruce NO lo pisa. Lo que el auditor capturó a mano se respeta.",
+            ],
+            [
+                "Los CFDI en conflicto se DESCARTAN",
+                "Si una misma llave apunta a varios conceptos del CFDI con valores DISTINTOS, no se elige ninguno: se deja vacío y se reporta en el conteo 'CFDI en conflicto'. Preferimos no llenar a llenar mal. (Las líneas repetidas con valores idénticos sí se colapsan en una: dan igual.)",
+            ],
+        ],
+    )
+    doc.add_paragraph()
+
+    # 3. Copiadas del CFDI
+    _titulo(doc, "3. Columnas que se COPIAN del CFDI (CPA Vision)", AMARILLO, size=13)
     doc.add_paragraph(
         "Se copian tal cual, solo en las celdas que venían vacías en Compras.",
     ).runs[0].font.size = Pt(9)
@@ -117,8 +175,8 @@ def main() -> None:
     )
     doc.add_paragraph()
 
-    # 3. Del propio Compras
-    _titulo(doc, "3. Columna que se toma del propio Compras", VERDE, size=13)
+    # 4. Del propio Compras
+    _titulo(doc, "4. Columna que se toma del propio Compras", VERDE, size=13)
     _tabla(
         doc,
         ["Columna", "Se toma de", "Qué es"],
@@ -126,8 +184,8 @@ def main() -> None:
     )
     doc.add_paragraph()
 
-    # 4. EDI calculadas
-    _titulo(doc, "4. Columnas EDI que se CALCULAN", NARANJA, size=13)
+    # 5. EDI calculadas
+    _titulo(doc, "5. Columnas EDI que se CALCULAN", NARANJA, size=13)
     _tabla(
         doc,
         ["Columna", "Fórmula", "Ejemplo"],
@@ -136,31 +194,75 @@ def main() -> None:
             ["impart_edi", "ctobto_edi × canfac_edi × (1 + poriva_edi)", "220 × 320 × 1 = 70,400"],
         ],
     )
+    _parrafo_9(
+        doc,
+        "Solo se calculan donde la celda estaba vacía Y hay insumo (ctonto_edi con dato): "
+        "así no se inventan ceros en renglones que no cruzaron.",
+        italic=True,
+    )
     doc.add_paragraph()
 
-    # 5. Auditoría
-    _titulo(doc, "5. Columnas de AUDITORÍA (el corazón del cálculo)", NARANJA, size=13)
-    doc.add_paragraph(
+    # 6. Columnas de control
+    _titulo(doc, "6. Columnas de CONTROL (doble validación, no son del entregable)", size=13)
+    _parrafo_9(
+        doc,
+        "Los importes de impuesto se COPIAN del CFDI, no se despejan del total. Se midió "
+        "sobre 66 millones de renglones: las columnas IVA e IEPS de CPA Vision coinciden al "
+        "100% con el importe del impuesto, mientras que despejarlos desde el Total solo "
+        "acierta en el 0.9%. La causa es que la mayoría de las facturas de Soriana mezclan "
+        "artículos gravados y a tasa 0 (alimentos), y dividir el Total completo entre 1.16 "
+        "asume que todo está gravado. La fórmula se conserva únicamente como control:",
+    )
+    _tabla(
+        doc,
+        ["Columna de control", "Fórmula", "Para qué sirve"],
+        [
+            [
+                "impiva_edi_formula",
+                "totfactura ÷ (1 + poriva_edi) × poriva_edi",
+                "Se compara contra impiva_edi (el valor bueno, copiado del CFDI). Si difieren más de 2 centavos se reporta.",
+            ],
+            [
+                "imieps_edi_formula",
+                "totfactura ÷ (1 + prieps_edi) × prieps_edi",
+                "Igual, contra imieps_edi. Es normal que difieran: confirma que copiar era lo correcto.",
+            ],
+        ],
+    )
+    doc.add_paragraph()
+
+    # 7. Auditoría
+    _titulo(doc, "7. Columnas de AUDITORÍA (el corazón del cálculo)", NARANJA, size=13)
+    _parrafo_9(
+        doc,
         "Aquí se compara lo que Soriana pagó (ctouni, su sistema) contra lo que el proveedor "
-        "facturó (ctonto_edi, del CFDI). Regla conservadora: solo corrige a la baja."
-    ).runs[0].font.size = Pt(9)
+        "facturó (ctonto_edi, del CFDI). Regla conservadora: solo corrige a la baja.",
+    )
+    _parrafo_9(
+        doc,
+        "IMPORTANTE — qué significa 'cruzó con CPA': que el renglón TRAE dato del CFDI "
+        "(uuid o ctonto_edi presentes), no que el valor sea distinto de cero. Un CFDI puede "
+        "traer IVA o IEPS = 0 legítimamente (producto exento) y ese 0 debe respetarse. "
+        "Confirmado con Mónica y Perla el 2026-07-31.",
+        italic=True,
+    )
     _tabla(
         doc,
         ["Columna", "Cálculo", "Significado"],
         [
             [
                 "cto_aud",
-                "Si hay EDI y ctonto_edi < ctouni → ctonto_edi; si no → ctouni",
-                "Costo auditado: el menor entre lo pagado y lo facturado",
+                "Si cruzó CPA y ctonto_edi>0 y < ctouni → ctonto_edi; si no → ctouni",
+                "Costo auditado: el menor entre lo pagado y lo facturado (nunca 0)",
             ],
             [
                 "iva_aud",
-                "Si hay EDI → poriva_edi; si no → iva_t007s (tasa SAP)",
+                "Si cruzó CPA → poriva_edi (aunque sea 0); si no → iva_t007s (tasa SAP)",
                 "Tasa de IVA que se aplica al cálculo",
             ],
             [
                 "ieps_aud",
-                "Si hay EDI → prieps_edi; si no → ieps_t007s (tasa SAP)",
+                "Si cruzó CPA → prieps_edi (aunque sea 0); si no → ieps_t007s (tasa SAP)",
                 "Tasa de IEPS que se aplica",
             ],
             [
@@ -215,7 +317,7 @@ def main() -> None:
     pie.add_run(
         "Generado automáticamente desde scripts/generar_guia_columnas.py. "
         "Fuente: docs/MAPEO_CRUCE_CPA_COMPRAS.md, docs/LOGICA_NEGOCIO.md y "
-        "automation_cobros/calculations.py."
+        "automation_costos/calculations.py."
     )
     pie.runs[0].italic = True
     pie.runs[0].font.size = Pt(8)

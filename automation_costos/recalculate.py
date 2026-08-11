@@ -4,8 +4,8 @@ from pathlib import Path
 
 import pandas as pd
 
-from automation_cobros.calculations import prepare_compras_dataframe
-from automation_cobros.excel_exporter import write_compras_workbook
+from automation_costos.calculations import prepare_compras_dataframe
+from automation_costos.excel_exporter import write_compras_workbook
 
 
 def read_compras_workbook(path: Path) -> pd.DataFrame:

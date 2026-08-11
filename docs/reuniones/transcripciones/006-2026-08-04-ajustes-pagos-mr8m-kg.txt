@@ -1,0 +1,69 @@
+Reunión 2026-08-04 — Perla Maya, Mónica López, Óscar Pineda
+Tema: Ajustes de pago MR8M y KG-14 que anulan diferencias del Consolidado.
+(Transcripción íntegra, sin editar. Respaldo de la nota 006.)
+
+Maya, Perla 27:18
+OK, yo les voy a presentar este a ver si no fue de lo que ya vieron. Pero les voy a presentar el caso que estuve revisando y, por ejemplo, ahí pueden ver mi pantalla.
+
+Pineda, Oscar 27:34
+Sí.
+
+Maya, Perla 27:36
+Listo, bueno, este es el archivo, es tu archivo Oscar. Yo de aquí hice un cruce de la información que tenía el auditor, pero también había como algunas cosas que yo tenía que corregir del auditor. Entonces dentro de tu resultado, por ejemplo, había algunas diferencias importantes que yo no tenía detectadas, y esto es por lo que te mencionaba hace un momento, Moni, son ajustes que no estás contemplando dentro del pago final, porque tú te vas al pago que está dentro de compras. Entonces aquí no tendrías tanto alcance. Sin embargo, yo estaba viendo con Mani si podemos contemplar ya estos movimientos. Mira, por ejemplo, este dice ajuste MR8M, tú tienes una diferencia de 236000 pesos, sin embargo me voy aquí a la de pagos. Esta es la factura, esta es la nota de entrada 764. Déjame filtrarla. Te voy a mostrar la que ya tenía filtrada, por ejemplo, tú tienes otra diferencia de 155000 pesos y yo tenía diferencias cero aquí. Lo que pasa es que el total pagado tienes 310, sin embargo si nos vamos a pagos hay un ajuste adicional que no estás contemplando y este es muy difícil que lo puedas rastrear, porque si te fijas no tiene… ay, pero este no está. Bueno, creo que el corte es hasta el 2021.
+
+Maya, Perla 29:27
+¿Qué dice check number cero? Bueno, eso lo reviso porque aparece que no está compensado.
+
+Lopez, Monica 29:34
+Sí, es como si está identificado por el cliente, pero no está ejecutado.
+
+Maya, Perla 29:39
+Okey, déjame ver si en el estado de cuenta actual sí está ejecutado, pero tomando en cuenta, si estuviera ejecutado, ahorita lo reviso porque ese es el pequeño detalle que no contemplé. Este movimiento no hace referencia a una nota de entrada, no está al detalle de la tienda.
+
+Lopez, Monica 29:43
+Es ajá.
+
+Pineda, Oscar 29:50
+Sí.
+
+Maya, Perla 29:58
+Y solamente integra el número de factura. Pero si te fijas hay errores de captura en estos periodos en el número de factura. Entonces lo que yo hice fue identificar todos estos MR8M que incluso vienen en la parte de pagos. Yo lo clasifiqué y dije, bueno, cuáles son todos estos MR8M, y los ligué. No viene por el número de nota de entrada, pero viene por el número de factura. Entonces yo lo ligué con el número de factura, que es el 12244. Entonces este movimiento mataría nada más aquí. Ahorita voy a confirmar que esté efectivamente compensado, debe tener un check number, un folio para contemplarlo.
+
+Maya, Perla 30:56
+No, pero este sí es el pagos final. Reviso porque esa es la tabla que teníamos aquí con el auditor y ya es del año anterior. No sé si hay algún movimiento que ya se haya ejecutado, pero en caso de que sí tuviera documento compensatorio, tú tendrías que tomarlo. Sí podemos considerar en el resultado final todos estos movimientos haciendo un filtro en pagos, así como están MR8M, como no tienen nota, ver si hay posibilidad de ligarlo con la factura para que todos estos movimientos se contemplen.
+
+Maya, Perla 32:03
+Ya aquí el concatenate prácticamente es la nota de entrada más la tienda, que así es como se efectúa el pago. Mira, por ejemplo, este tienes 473000 pesos como pagado, pero me voy a ir por el número de factura. Si te fijas hay un movimiento adicional que no se puede rastrear directamente porque no hay…
+
+Pineda, Oscar 32:35
+No tiene nota de entrada.
+
+Maya, Perla 32:37
+Exactamente, lo único que tiene es el número de factura, si está compensado nada más tendremos que ver que esté compensado. Ese es el documento compensatorio, pero en DOC_TEXT aparece como MR8M. Entonces ya lo contemplo: 236000 pesos es lo que debió pagar y lo que pagó. Todos estos que dicen ajuste MR8M se cancelan por estos movimientos adicionales que tú no tuviste alcance, pero sí podemos contemplarlos, puede ser que te reduzca toda esta diferencia.
+
+Maya, Perla 33:27
+Mismo caso para estos ejercicios. A nosotros nos causaba duda porque estas diferencias son de los ejercicios de diciembre 2022 a 2025. Aquí hicieron un movimiento, una validación, o un proceso interno en donde hacían por línea el cálculo y si había un ajuste se hacía inmediatamente. Entonces ya no teníamos diferencia en estos ejercicios. Otro punto que podríamos contemplar para depurar estas diferencias: mira, por ejemplo, en la parte de esta factura de pagos, es mismo caso. Me toma 222 este filtro por número de factura, pero estos corresponden a la tienda. Acá tiene otra tienda, por eso cambia; nada más que el número de factura es el mismo para estas líneas que son el mismo número de factura y tienda. Tú pusiste el monto de 20000 pesos, pero ya hay un ajuste de 3075 pesos y me daba un monto pagado de 17180 que es el que tenemos como debió pagar. Debió pagar 7180, pago de 7680 y se cancela. Hice una liga de estos movimientos que sí los pude detectar en la parte de pagos. Aquí vienen, son estos movimientos que aparecen como KG, todos los movimientos aparecen como KG, y que tengan en BSAK_BSIK inicien con el número 14 hacen referencia a una afectación directo de la factura. Entonces todos estos son ajustes posteriores o dentro del mismo ejercicio y nada más los crucé. Estos ajustes también los podríamos contemplar. Están clasificados, vienen desglosados en el reporte de pagos, pero si quieres hacer un filtro, todos los COD_TYPE KG que inicien en BSAK_BSIK 14 y ya. Esto me mató la diferencia que tú me pusiste aquí.
+
+Pineda, Oscar 36:18
+O sea, intentar también agregar la parte de pagos.
+
+Maya, Perla 36:33
+Las que tenemos más identificadas serían… yo creo que eso sería una ayuda para que ya no lo haga el auditor este cruce. Identifiquemos los MR8M, esos son los que podríamos contemplar. No sé si esté un poquito más difícil o te cause más conflicto.
+
+Pineda, Oscar 36:53
+Okay.
+
+Maya, Perla 37:04
+Pero bueno, si no lo podemos poner en un segundo bloque, no sé.
+
+Lopez, Monica 37:04
+Lo que pasa es que en Line Item, Oscar, hay dos pagos, uno por nota de entrada y otro por factura, porque como los ejemplos que vimos ahorita, hay veces que o lo identificas por número de factura o lo identificas por nota de entrada. Entonces yo pedí a Data Services que agregaran 2 pagos, uno por número de factura y otro por nota de entrada. Entonces a lo mejor ahí puede haber un pago diferente para cada una de esas columnas. El tema va a ser cómo integrarlo en el archivo de salida, porque no podemos hacer 2 diferencias, una por nota de entrada y una por factura. Creo que lo que pudiéramos hacer es agregar por columna ese ajuste de pagos, por ejemplo todos los MR8M y todos los KG que son 14, que eran los que te comentaba al inicio de la llamada. Esos movimientos 14 yo ya había solicitado que los integraran en el pago; necesito revisar si en algún periodo se omitió ese paso y si en alguno sí se está haciendo y en otros años no. Igual valida alguno de esos ejemplos en Line Item: si viene diferente el total pagado a nivel nota de entrada y el total pagado a nivel factura, a lo mejor ahí es donde cae el ajuste que ahorita no estamos incluyendo en el archivo de salida.
+
+Pineda, Oscar 39:02
+Claro. Es que es directamente desde la salida que genera Audit Tools en compras, no contempla esos casos. No está validado por Audit Services. Entonces la opción sería, aparte de sacar la información de line item como viene en compras en Audit Tools, también sacar la información de pagos y entrar a esos casos en concreto que son los de KG y los de MR8M, validar esos casos.
+
+Lopez, Monica 39:40
+Mhm.
+
+Maya, Perla 39:42
+MR8M sigue, ajá.

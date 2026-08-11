@@ -7,7 +7,7 @@ from zipfile import ZipFile
 
 import pandas as pd
 
-from automation_cobros.utils import ensure_parent, safe_filename
+from automation_costos.utils import ensure_parent, safe_filename
 
 try:
     import pyarrow as pa

@@ -6,5 +6,7 @@ __pycache__/
 dist/
 build/
 *.spec
+# El spec del release SI se versiona: scripts/build_release.py depende de el.
+!AutomationCostos.spec
 logs/
 outputs/

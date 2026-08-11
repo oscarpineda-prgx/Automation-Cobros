@@ -27,8 +27,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
-from automation_cobros.calculations import prepare_compras_dataframe
-from automation_cobros.cruce_cpa import (
+from automation_costos.calculations import prepare_compras_dataframe
+from automation_costos.cruce_cpa import (
     ResultadoCruce,
     cargar_cpa,
     cruzar,
@@ -36,10 +36,10 @@ from automation_cobros.cruce_cpa import (
     rfc_de_compras,
     solo_digitos,
 )
-from automation_cobros.database import contar_compras, fetch_compras
-from automation_cobros.excel_exporter import write_compras_files
-from automation_cobros.utils import clean_code, safe_filename
-from automation_cobros.validation_exporter import write_validation_from_dataframe
+from automation_costos.database import contar_compras, fetch_compras
+from automation_costos.excel_exporter import write_compras_files
+from automation_costos.utils import clean_code, safe_filename
+from automation_costos.validation_exporter import write_validation_from_dataframe
 
 # Subcarpeta, dentro de la del proveedor, donde se dejan los ZIP de CPA Vision que
 # respaldan la salida. Con espacios, tal como se acordó nombrarla.
@@ -86,7 +86,7 @@ def generar_salida_proveedor(
 
     if total > MAX_FILAS_EN_MEMORIA:
         log(f"      Proveedor grande (> {MAX_FILAS_EN_MEMORIA:,}): se procesa por trimestres.")
-        from automation_cobros.pipeline_streaming import generar_salida_proveedor_por_anios
+        from automation_costos.pipeline_streaming import generar_salida_proveedor_por_anios
 
         return generar_salida_proveedor_por_anios(
             vendor, start_date, end_date, parquet_root, output_dir, log=log

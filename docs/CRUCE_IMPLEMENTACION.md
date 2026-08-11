@@ -4,13 +4,13 @@
 > viene de dónde y con qué evidencia) está en
 > [MAPEO_CRUCE_CPA_COMPRAS.md](MAPEO_CRUCE_CPA_COMPRAS.md).
 >
-> **Creado:** 2026-07-22 · **Módulo:** [`automation_cobros/cruce_cpa.py`](../automation_cobros/cruce_cpa.py)
+> **Creado:** 2026-07-22 · **Módulo:** [`automation_costos/cruce_cpa.py`](../automation_costos/cruce_cpa.py)
 
 ---
 
 ## 0. Pipeline de una sola acción (lo que produce el entregable)
 
-`automation_cobros/pipeline.py` encadena las cuatro etapas post-descarga **en memoria**:
+`automation_costos/pipeline.py` encadena las cuatro etapas post-descarga **en memoria**:
 
 ```
 SQL (compras) → cruce CPA Vision → recálculo → Validación de Condiciones

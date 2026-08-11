@@ -1,0 +1,56 @@
+Reunión 2026-08-04 (continuación) — Mónica López, Perla Maya, Óscar Pineda
+Tema: Documento compensatorio (ChkNbr) y alerta para devoluciones no compensadas.
+(Transcripción íntegra, sin editar. Respaldo de la nota 007.)
+
+Lopez, Monica 1:02:07
+El documento compensatorio es algo que se genera en el estado de cuenta del proveedor cada que le pagan; al proveedor le pagan cada semana. El sistema hace el corte los miércoles y determina "todas estas facturas están vencidas y ya se las voy a pagar al proveedor y todos estos cargos se los tengo que descontar". Entonces suma todo, abono y cargo, y saca el neto a pagarle al proveedor. Se le genera un voucher, que es este campo que se llama check number.
+
+Pineda, Oscar 1:02:51
+Sí.
+
+Lopez, Monica 1:02:51
+Donde Soriana ya le liquidó al proveedor lo correspondiente a esa semana. Entonces todas las líneas que se fueron en el pago de esa semana se les pone el número del folio compensatorio de acuerdo a como lo va generando el sistema. O sea, si el check number ya trae un número, es que el pago ya fue efectivo hacia la cuenta del proveedor.
+
+Pineda, Oscar 1:03:17
+Sí. Okay. Vale, vale.
+
+Lopez, Monica 1:03:22
+Mhm.
+
+Pineda, Oscar 1:03:27
+(ok)
+
+Lopez, Monica 1:03:33
+No sé cómo lo veas, Oscar, si está muy... o podríamos hacer, digo, en un inicio, el incluir los movimientos. Es que no sé cómo le pudiéramos poner como una alerta al auditor de que "oye, sabes que mira, en esta factura el neto es este, pero hay un registro que no está compensado".
+
+Pineda, Oscar 1:03:57
+Mhm. Se podría, o sea, un registro que no está compensado cuando el check number no tenga datos, o sea, esté vacío.
+
+Lopez, Monica 1:04:09
+Ajá, esté vacío.
+
+Pineda, Oscar 1:04:12
+Sí se le puede hacer una alerta. Entonces sería cruzar estos pagos por medio de la factura y el proveedor contra el archivo de compras o de validación de condiciones. Cruzar esto y hacer como un estilo de conteo de los registros que en check number sea igual a vacío. Ese conteo me dice cuándo no hay registros con check number vacío, entonces está okay; pero cuando hay registros que tienen check number vacío, significa que tiene pagos no compensados. Esa sería la bandera.
+
+Lopez, Monica 1:04:59
+Ajá, cierto, esa sería la bandera, sí.
+
+Pineda, Oscar 1:05:04
+Realmente creo que lo primordial es empezar a avanzar; siento que es bastante información, entonces hasta que no empiece a extraer la información de pagos y empezar a trabajarla, no vamos a poder avanzar con esos casos en concreto.
+
+Lopez, Monica 1:05:19
+Mhm.
+
+Pineda, Oscar 1:05:23
+(seguimos con lo que hay) puedo avanzar con la información que me han brindado y generar otra reunión para validar cómo quedó esa información y si tenemos que hacer cambios. Ya si me dicen "acá no está cruzando bien porque faltó este filtro o este cruce".
+
+Lopez, Monica 1:05:29
+Sí, y que a lo mejor son mínimos.
+
+Pineda, Oscar 1:05:32
+Exacto, entonces sí, por ahora avanzo con esto.
+
+---
+Nota de Óscar: además del conteo, si una misma factura tiene varios registros con ChkNbr
+vacío, agregar una columna (Conteo_no_compensados) que indique cuántos registros de pagos
+están no compensados, y colocarla en el Consolidado de validación de condiciones.

@@ -1,6 +1,6 @@
-# Automation Cobros - Fase 1
+# Automation Costos - Fase 1
 
-Base de automatizacion para el proyecto de COSTOS/Cobros.
+Base de automatizacion para el proceso de COSTOS de la auditoria Soriana (PRGX).
 
 ## Alcance actual
 
@@ -152,8 +152,8 @@ TrustServerCertificate=yes
 Se puede cambiar sin editar codigo usando variables de entorno:
 
 ```powershell
-$env:COBROS_DB_SERVER = "ATL20AF2222SQ19"
-$env:COBROS_DB_NAME = "SORIANA_PROJECTS"
+$env:COSTOS_DB_SERVER = "ATL20AF2222SQ19"
+$env:COSTOS_DB_NAME = "SORIANA_PROJECTS"
 ```
 
 Variables opcionales para CPA Vision:
@@ -193,4 +193,4 @@ Cuando se quiera distribuir:
 .\build_exe.ps1
 ```
 
-El ejecutable quedara en `dist\AutomationCobros.exe`.
+El ejecutable quedara en `dist\AutomationCostos.exe`.

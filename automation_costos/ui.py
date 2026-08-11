@@ -110,6 +110,11 @@ class Indicadores:
         self.puntos.clear()
         self.barras.clear()
 
+    def limpiar_estados(self) -> None:
+        """Regresa todos los indicadores a 'idle' sin desregistrarlos (botón Limpiar)."""
+        for clave in list(self.puntos):
+            self.estado(clave, "idle")
+
     def estado(self, clave: str, estado: str) -> None:
         """Actualiza punto y barra. Seguro de llamar desde otro hilo."""
         self.root.after(0, lambda: self._aplicar(clave, estado))
@@ -319,6 +324,7 @@ def campo(
     etiqueta: str,
     variable: ctk.StringVar,
     ancho: int = 130,
+    show: str | None = None,
 ) -> ctk.CTkEntry:
     ctk.CTkLabel(
         parent,
@@ -336,6 +342,7 @@ def campo(
         border_color=tema("border"),
         text_color=tema("t1"),
         corner_radius=6,
+        show=show or "",
     )
     entrada.pack(side="left", pady=12)
     return entrada

@@ -15,8 +15,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from automation_cobros.cruce_cpa import cargar_cpa, cruzar, rfc_de_compras, solo_digitos
-from automation_cobros.database import fetch_compras
+from automation_costos.cruce_cpa import cargar_cpa, cruzar, rfc_de_compras, solo_digitos
+from automation_costos.database import fetch_compras
 
 PARQUET = "outputs/cpa_vision/parquet"
 

@@ -26,7 +26,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from automation_cobros.utils import to_number
+from automation_costos.utils import to_number
 
 # Columnas de Compras que se copian tal cual desde CPA Vision.
 COLUMNAS_COPIADAS: dict[str, str] = {

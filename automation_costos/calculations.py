@@ -3,7 +3,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from automation_cobros.utils import (
+from automation_costos.utils import (
     clean_code_series,
     make_folio_series,
     normalize_date_columns,
@@ -213,10 +213,20 @@ def recalculate_dataframe(df: pd.DataFrame, *, en_sitio: bool = False) -> pd.Dat
     iva_t007s = to_number(_col(df, "iva_t007s"))
     ieps_t007s = to_number(_col(df, "ieps_t007s"))
 
-    has_edi_cost = ctonto_edi.ne(0)
-    df["cto_aud"] = np.where(has_edi_cost & ctonto_edi.lt(ctouni), ctonto_edi, ctouni).round(4)
-    df["iva_aud"] = np.where(has_edi_cost, poriva_edi, iva_t007s).round(6)
-    df["ieps_aud"] = np.where(has_edi_cost, prieps_edi, ieps_t007s).round(6)
+    # "Cruzó con CPA Vision" = la fila trae datos de la factura electrónica (CFDI). Se
+    # detecta por PRESENCIA real de UUID o del costo del CFDI, no por que el valor sea
+    # distinto de cero: un CFDI puede traer IVA/IEPS = 0 legítimamente (producto exento) y
+    # ese 0 debe respetarse. Reunión 2026-07-31 (Mónica/Perla): si la fila cruza, los tres
+    # campos auditados toman lo del CFDI aunque sea 0; si no cruza, se deja lo del sistema
+    # (nunca se pone 0 al costo). Ver docs/reuniones/005-2026-07-31-costo-impuestos-cruce.md.
+    cruzo_cpa = _presente(df, "uuid") | _presente(df, "ctonto_edi")
+    # cto_aud: el menor de los dos, pero nunca cero. Si cruzó y el costo del CFDI es válido
+    # (>0) y menor al del sistema, gana el del CFDI; en cualquier otro caso, ctouni.
+    df["cto_aud"] = np.where(
+        cruzo_cpa & ctonto_edi.gt(0) & ctonto_edi.lt(ctouni), ctonto_edi, ctouni
+    ).round(4)
+    df["iva_aud"] = np.where(cruzo_cpa, poriva_edi, iva_t007s).round(6)
+    df["ieps_aud"] = np.where(cruzo_cpa, prieps_edi, ieps_t007s).round(6)
     df["imp_aud"] = (
         to_number(df["cto_aud"])
         * can_rec
@@ -324,6 +334,17 @@ def _col(df: pd.DataFrame, name: str) -> pd.Series:
     if name in df.columns:
         return df[name]
     return pd.Series([np.nan] * len(df), index=df.index)
+
+
+def _presente(df: pd.DataFrame, name: str) -> pd.Series:
+    """True donde la columna trae dato real (no nulo ni cadena vacía/'None'/'nan').
+
+    Sirve para saber si una fila cruzó con CPA Vision sin depender del valor numérico:
+    un 0 legítimo (p. ej. IVA 0%) cuenta como dato presente.
+    """
+    serie = _col(df, name)
+    texto = serie.astype(str).str.strip().str.lower()
+    return serie.notna() & ~texto.isin(["", "none", "nan"])
 
 
 def _best_total_paid_ne(df: pd.DataFrame) -> pd.Series:

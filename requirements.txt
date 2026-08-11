@@ -9,3 +9,5 @@ playwright>=1.48
 pyodbc>=5.1
 pyinstaller>=6.0
 python-dotenv>=1.0
+# scripts/generar_guia_columnas.py y generar_guia_validacion.py generan los .docx
+python-docx>=1.1

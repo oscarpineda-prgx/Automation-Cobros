@@ -1,0 +1,107 @@
+Reunión 2026-07-31 — Mónica López, Perla Maya, Óscar Pineda
+Tema: Costo unitario sistema en cero y manejo de impuestos cuando no cruza CPA Vision.
+(Transcripción íntegra, sin editar. Respaldo de la nota 005.)
+
+Lopez, Monica 16:01
+Aquí nada más me queda una duda porque en costo unitario sistema nos está dejando en cero.
+
+Pineda, Oscar 16:07
+A ver, déjame reviso porque en compra sí está con un valor cierto.
+
+Lopez, Monica 16:11
+En compras, déjame regreso a compras.
+Mira el costo que usamos.
+Es este que se llama.
+Costo uni.
+
+Pineda, Oscar 16:26
+Costo uni a.
+Dame un momentico.
+
+Pineda, Oscar 24:11
+¿Entonces, en este caso, cuál se tomó?
+
+Maya, Perla 24:11
+Pero es porque no se te ligó información. Es que como ahí no se te ligó información, Oscar, pues no podemos deducir que es cero también el impuesto. Tendríamos que dejar el del sistema.
+
+Lopez, Monica 24:11
+Que no se te llegó la información.
+Como hay unos.
+Ok, cero también.
+Digamos que diferente.
+¿Qué generaría?
+
+Maya, Perla 24:29
+Te generaría una diferencia y no sabemos si efectivamente es correcto porque pues no se cruza la información.
+
+Pineda, Oscar 24:39
+Sí. Listo.
+
+Lopez, Monica 24:44
+Sí, en las que no se te cruce nada de EDI.
+Se va a dejar en costo auditoría el mismo costo del sistema y el mismo impuesto del sistema.
+O sea, por ejemplo, aquí mira el costo out nosotros.
+
+Pineda, Oscar 25:00
+Okay.
+
+Lopez, Monica 25:05
+Digo, aquí este es el archivo tuyo, ¿verdad? O sea, no se ligó nada de EDI.
+
+Pineda, Oscar 25:10
+Ajá, sí, correcto.
+
+Lopez, Monica 25:11
+Okay, bueno, entonces el costo out como no se ligó nada de EDI, pues tenemos que dejar el que trae el sistema, que es el costo UNI, que en este caso es el 27.72.
+
+Pineda, Oscar 25:26
+Que fue con que la condición sí se cumplió, o sea, creo que esa ya está, ¿cierto? Sí.
+
+Lopez, Monica 25:27
+¿Qué está aquí?
+Sí, o sea, cuando sea menor, ya ves que ahorita te dije que vamos a dejar el menor de los 2, pero si de EDI no se te ligó nada, entonces tenemos que dejar el que ya trae el sistema porque no le podríamos poner cero al costo.
+
+Pineda, Oscar 25:40
+Mhm. Vale. Listo. Okay.
+
+Lopez, Monica 25:56
+Y aquí también en el IVA out y en el IEPS out, como no se ligó nada, no los podemos dejar en cero, le dejamos el que trae el sistema. O sea, en este caso, como no se ligó nada de EDI, este costo out es igual al costo UNI.
+Y como no se ligó nada de IVA con factura electrónica, entonces este es el T007 IVA.
+
+Pineda, Oscar 26:23
+Sí, okay.
+
+Lopez, Monica 26:24
+Y este sería el T007 IEPS, o sea, tal cual el que trae el sistema registrado en esos campos.
+
+Pineda, Oscar 26:34
+Listo. Vale, ahí me quedó claro.
+
+Lopez, Monica 26:39
+Okey, okey.
+
+Pineda, Oscar 26:42
+Todas esas condiciones ya también ahorita las valido correctamente, que quedan aplicadas.
+
+Lopez, Monica 26:47
+Sí. Creo que sí, a lo mejor falta algún detallito, porque sí te está saliendo en el archivo de validación. O sea, sí dejaste el 27 y sí dejaste el 16, pero nomás para que lo corrobores, más que nada cuando no se ligó nada.
+
+Pineda, Oscar 27:00
+Sí.
+
+Lopez, Monica 27:07
+¿Y sí lo estás manteniendo?
+
+Pineda, Oscar 27:10
+Sí, o sea, creo que sí estoy aplicando esa lógica, pero aún así voy a validar que esté correcto.
+
+Lopez, Monica 27:17
+Okey, de acuerdo.
+
+---
+Notas de Óscar tras la reunión:
+- Si se ligó ctonto_edi y poriva_edi se ligó en 0, entonces iva_aud debe ser 0. Así iva_t007s tenga 0.16.
+- Lo que prima es la factura. Vamos a respetar el correcto.
+- En la condición de cto_aud la del menor va, pero cuando no se ligó nada de CPA (EDI) entonces cto_aud = ctouni.
+- iva_aud = iva_t007s (cuando no cruza).
+- CtoUnitario_sistema -> ctouni.

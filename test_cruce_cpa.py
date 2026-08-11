@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from automation_cobros.cruce_cpa import cruzar, leer_compras
+from automation_costos.cruce_cpa import cruzar, leer_compras
 
 COMPRAS = Path("outputs/Compras_ALC0011111Y9_ALCEDA S. A. DE C. V.xlsx")
 FILAS = 400

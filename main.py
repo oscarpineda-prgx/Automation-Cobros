@@ -3,14 +3,14 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from automation_cobros.database import fetch_compras
-from automation_cobros.excel_exporter import write_compras_workbook
-from automation_cobros.recalculate import recalculate_compras_file
-from automation_cobros.validation_exporter import write_validation_workbook
+from automation_costos.database import fetch_compras
+from automation_costos.excel_exporter import write_compras_workbook
+from automation_costos.recalculate import recalculate_compras_file
+from automation_costos.validation_exporter import write_validation_workbook
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Automation Cobros - fase 1")
+    parser = argparse.ArgumentParser(description="Automation Costos - fase 1")
     sub = parser.add_subparsers(dest="command")
 
     extract = sub.add_parser("extract", help="Consulta SQL y genera Compras preliminar")
@@ -192,6 +192,7 @@ def build_parser() -> argparse.ArgumentParser:
     cpa_val.add_argument("--end", required=True, help="Fecha final YYYY-MM-DD")
     cpa_val.add_argument("--parquet", required=True, help="Carpeta raiz del dataset Parquet")
     cpa_val.add_argument("--output-dir", default=None, help="Carpeta de salida")
+    cpa_val.add_argument("--por-mes", action="store_true", help="Partir por mes en vez de trimestre (menos memoria)")
 
     cpa_comp = sub.add_parser(
         "cpa-compras-grande",
@@ -204,6 +205,16 @@ def build_parser() -> argparse.ArgumentParser:
     cpa_comp.add_argument("--output-dir", default=None, help="Carpeta de salida")
     cpa_comp.add_argument("--por-mes", action="store_true", help="Partir por mes en vez de trimestre")
 
+    exc_report = sub.add_parser(
+        "exception-report",
+        help="Consolida las diferencias de varias Validaciones en un Exception Report",
+    )
+    exc_report.add_argument(
+        "--input", required=True, nargs="+",
+        help="Carpeta(s) a escanear (recursivo) o archivos Validacion_*.xlsx sueltos",
+    )
+    exc_report.add_argument("--output", required=True, help="Excel de salida (Exception Report)")
+
     sub.add_parser("gui", help="Abre la interfaz grafica")
     return parser
 
@@ -213,7 +224,7 @@ def main() -> None:
     args = parser.parse_args()
 
     if args.command in (None, "gui"):
-        from automation_cobros.app import run_app
+        from automation_costos.app import run_app
 
         run_app()
         return
@@ -233,7 +244,7 @@ def main() -> None:
 
     if args.command == "cpa-salida":
         import config
-        from automation_cobros.pipeline import generar_salida_proveedor
+        from automation_costos.pipeline import generar_salida_proveedor
 
         salida_dir = Path(args.output_dir) if args.output_dir else config.OUTPUT_DIR
         resultado = generar_salida_proveedor(
@@ -253,11 +264,11 @@ def main() -> None:
 
     if args.command == "cpa-validacion-grande":
         import config
-        from automation_cobros.pipeline_streaming import generar_validacion_grande
+        from automation_costos.pipeline_streaming import generar_validacion_grande
 
         salida_dir = Path(args.output_dir) if args.output_dir else config.OUTPUT_DIR
         resultado = generar_validacion_grande(
-            args.vendor, args.start, args.end, args.parquet, salida_dir
+            args.vendor, args.start, args.end, args.parquet, salida_dir, por_mes=args.por_mes
         )
         print(f"\nRFC: {resultado.rfc}")
         print(f"Validacion: {resultado.validacion_path}")
@@ -266,7 +277,7 @@ def main() -> None:
 
     if args.command == "cpa-compras-grande":
         import config
-        from automation_cobros.pipeline_streaming import generar_compras_grande
+        from automation_costos.pipeline_streaming import generar_compras_grande
 
         salida_dir = Path(args.output_dir) if args.output_dir else config.OUTPUT_DIR
         rutas = generar_compras_grande(
@@ -276,7 +287,7 @@ def main() -> None:
         return
 
     if args.command == "cpa-cruce":
-        from automation_cobros.cruce_cpa import cruzar_proveedor
+        from automation_costos.cruce_cpa import cruzar_proveedor
 
         resultado, rfc = cruzar_proveedor(args.compras, args.parquet, rfc=args.rfc)
         print(f"RFC del proveedor: {rfc}\n")
@@ -286,7 +297,7 @@ def main() -> None:
         return
 
     if args.command == "cpa-session":
-        from automation_cobros.cpa_vision import CPAVisionSettings, run_manual_session
+        from automation_costos.cpa_vision import CPAVisionSettings, run_manual_session
 
         settings = CPAVisionSettings.from_overrides(
             base_url=args.url,
@@ -301,14 +312,14 @@ def main() -> None:
         return
 
     if args.command == "cpa-csvs":
-        from automation_cobros.cpa_vision import list_downloaded_csvs
+        from automation_costos.cpa_vision import list_downloaded_csvs
 
         for csv_path in list_downloaded_csvs(args.download_dir):
             print(csv_path)
         return
 
     if args.command == "cpa-downloads-page":
-        from automation_cobros.cpa_vision import CPAVisionSettings, open_downloads_page
+        from automation_costos.cpa_vision import CPAVisionSettings, open_downloads_page
 
         settings = CPAVisionSettings.from_overrides(
             base_url=args.url,
@@ -330,7 +341,7 @@ def main() -> None:
         return
 
     if args.command == "cpa-request-download":
-        from automation_cobros.cpa_vision import CPAVisionSettings, request_download_and_wait
+        from automation_costos.cpa_vision import CPAVisionSettings, request_download_and_wait
 
         settings = CPAVisionSettings.from_overrides(
             base_url=args.url,
@@ -353,7 +364,7 @@ def main() -> None:
         return
 
     if args.command == "cpa-wait-download":
-        from automation_cobros.cpa_vision import CPAVisionSettings, wait_for_existing_request_download
+        from automation_costos.cpa_vision import CPAVisionSettings, wait_for_existing_request_download
 
         settings = CPAVisionSettings.from_overrides(
             base_url=args.url,
@@ -375,7 +386,7 @@ def main() -> None:
         return
 
     if args.command == "cpa-batch-vendors":
-        from automation_cobros.cpa_vision import CPAVisionSettings, request_vendor_master_batch
+        from automation_costos.cpa_vision import CPAVisionSettings, request_vendor_master_batch
 
         settings = CPAVisionSettings.from_overrides(
             base_url=args.url,
@@ -403,7 +414,7 @@ def main() -> None:
         return
 
     if args.command == "cpa-zip-to-parquet":
-        from automation_cobros.cpa_parquet import zip_to_parquet_dataset
+        from automation_costos.cpa_parquet import zip_to_parquet_dataset
 
         input_path = Path(args.input)
         if input_path.is_file() and input_path.suffix.lower() == ".zip":
@@ -425,8 +436,15 @@ def main() -> None:
             )
         return
 
+    if args.command == "exception-report":
+        from automation_costos.exception_report import write_exception_report
+
+        salida = write_exception_report(args.input, Path(args.output))
+        print(f"\nException Report generado: {salida}")
+        return
+
     if args.command == "cpa-consolidate":
-        from automation_cobros.cpa_consolidator import consolidate_cpa_zip_to_excel
+        from automation_costos.cpa_consolidator import consolidate_cpa_zip_to_excel
 
         result = consolidate_cpa_zip_to_excel(Path(args.input), Path(args.output))
         print(f"Excel consolidado: {result.output_path}")

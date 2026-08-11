@@ -10,18 +10,23 @@ import config
 
 # F_COMPRAS está partido por año en dos bases del MISMO servidor:
 #   SORIANA_PROJECTS       -> compras 2020-2024
-#   SORIANA_2025_PROJECTS  -> compras 2025
+#   SORIANA_2025_PROJECTS  -> compras 2025 y 2026 (ver abajo)
 # Cada fuente cubre un rango de años cerrado. Un periodo que cruce el límite
 # (p. ej. 2020-2025 completo) consulta las dos y concatena. Agregar un año
-# futuro es añadir una línea aquí (p. ej. SORIANA_2026_PROJECTS -> 2026).
+# futuro es añadir una línea aquí (p. ej. SORIANA_2026_PROJECTS -> 2027).
 #
-# ⚠️ NO AMPLIAR el rango de SORIANA_2025_PROJECTS. Esa base *también* devuelve renglones
-# de 2022-2024, pero esos años **están incompletos** ahí (confirmado por Óscar el
-# 2026-07-24). La fuente de verdad de todo lo anterior a 2025 es SORIANA_PROJECTS.
-# Ampliar el rango no solo duplicaría renglones: metería datos parciales.
+# El periodo "2025" de la auditoría incluye el arrastre a 2026 (facturas tardías y pagos con
+# plazo hasta 90 días). SORIANA_2025_PROJECTS trae 2026 cargado hasta ~marzo-2026 (corte
+# actual), así que su límite superior se extiende a 2026 y la ejecución usa `--end 2026-03-31`
+# (reunión con Mónica, 2026-08-05). No duplica años: 2020-2024 sigue viniendo de la otra base.
+#
+# ⚠️ NO AMPLIAR el límite INFERIOR de SORIANA_2025_PROJECTS por debajo de 2025. Esa base
+# *también* devuelve renglones de 2022-2024, pero esos años **están incompletos** ahí
+# (confirmado por Óscar el 2026-07-24). La fuente de verdad de todo lo anterior a 2025 es
+# SORIANA_PROJECTS. El límite superior (2026) sí es seguro: 2026 no existe en ninguna otra base.
 FUENTES_COMPRAS = [
     (config.DB_NAME, 2020, 2024),
-    (config.DB_NAME_2025, 2025, 2025),
+    (config.DB_NAME_2025, 2025, 2026),
 ]
 
 
@@ -118,6 +123,35 @@ def contar_compras(vendor: str, start_date: str, end_date: str) -> int:
             cursor.execute(query, vendor, desde.isoformat(), hasta.isoformat())
             total += int(cursor.fetchone()[0])
     return total
+
+
+def resolver_rfc(vendor: str, start_date: str, end_date: str) -> str:
+    """Devuelve el RFC del proveedor leyendo un solo renglón de F_COMPRAS.
+
+    El RFC vive en la columna `cnpj` del Compras; para descargar de CPA Vision hace falta
+    ese RFC pero no todo el archivo. Un `SELECT TOP (1)` sobre la función es barato (segundos)
+    y evita traer las compras completas solo para conocer el RFC. Recorre las fuentes por año
+    y devuelve el primero que encuentre; cadena vacía si el proveedor no tiene compras.
+    """
+    inicio = pd.to_datetime(start_date).date()
+    fin = pd.to_datetime(end_date).date()
+    conn_str = config.get_connection_string()
+    with pyodbc.connect(conn_str) as conn:
+        cursor = conn.cursor()
+        for database, anio_ini, anio_fin in FUENTES_COMPRAS:
+            desde = max(inicio, date(anio_ini, 1, 1))
+            hasta = min(fin, date(anio_fin, 12, 31))
+            if desde > hasta:
+                continue
+            query = (
+                f"SELECT TOP (1) cnpj FROM {database}.dbo.F_COMPRAS(?, ?, ?) "
+                f"WHERE cnpj IS NOT NULL;"
+            )
+            cursor.execute(query, vendor, desde.isoformat(), hasta.isoformat())
+            row = cursor.fetchone()
+            if row and row[0]:
+                return str(row[0]).strip()
+    return ""
 
 
 def test_connection() -> None:

@@ -1,8 +1,8 @@
 # Rendimiento del exportador de Compras
 
 > **Última actualización:** 2026-07-23
-> **Archivos:** [`automation_cobros/excel_exporter.py`](../automation_cobros/excel_exporter.py),
-> [`automation_cobros/calculations.py`](../automation_cobros/calculations.py)
+> **Archivos:** [`automation_costos/excel_exporter.py`](../automation_costos/excel_exporter.py),
+> [`automation_costos/calculations.py`](../automation_costos/calculations.py)
 
 ---
 
@@ -152,7 +152,7 @@ DataFrame completo no cabe en 24 GB —Celaya (1.24M) ya usaba 13 GB— y `fetch
 con `MemoryError` en el paso de traer de SQL, antes de calcular nada.
 
 **Solución (sin tocar la función SQL `F_COMPRAS`):** procesar **por trimestres** y consolidar.
-Módulo [`pipeline_streaming.py`](../automation_cobros/pipeline_streaming.py):
+Módulo [`pipeline_streaming.py`](../automation_costos/pipeline_streaming.py):
 
 1. **Por trimestre** se llama `F_COMPRAS(vendor, ini, fin)` (su firma normal), se cruza con
    CPA y se acumula **por folio y por factura**: suma de `imp_aud` (debió pagar), suma de

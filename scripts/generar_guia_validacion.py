@@ -62,7 +62,7 @@ def main() -> None:
 
     h = doc.add_heading("Guía — Validación de Condiciones", level=0)
     h.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    sub = doc.add_paragraph("Automation Cobros · PRGX · Soriana Audit Suite")
+    sub = doc.add_paragraph("Automation Costos · PRGX · Soriana Audit Suite")
     sub.alignment = WD_ALIGN_PARAGRAPH.CENTER
     doc.add_paragraph()
 
@@ -73,15 +73,27 @@ def main() -> None:
         "reclamarlas. Se genera a partir del Compras ya cruzado y recalculado.",
     )
 
-    _titulo(doc, "Las 3 hojas del archivo", size=13)
+    _titulo(doc, "Las hojas del archivo (3, o 4 si hay devoluciones)", size=13)
     _tabla(
         doc,
-        ["Hoja", "Qué contiene"],
+        ["Hoja", "Qué contiene", "¿Siempre?"],
         [
-            ["Resumen", "El total de la diferencia a reclamar (una cifra)"],
-            ["Consolidado", "Una fila por nota de entrada con diferencia: cuánto se pagó, cuánto se debió, la diferencia"],
-            ["Detalle PAGOS", "El desglose artículo por artículo de esas notas de entrada"],
+            ["Resumen", "El total de la diferencia a reclamar (una cifra)", "Sí"],
+            ["Consolidado", "Una fila por nota de entrada con diferencia: cuánto se pagó, cuánto se debió, la diferencia", "Sí"],
+            [
+                "Ajustes",
+                "Bitácora de las devoluciones de pago (MR8M / KG-14) que anulan o reducen diferencias",
+                "Solo si el proveedor tiene devoluciones",
+            ],
+            ["Detalle PAGOS", "El desglose artículo por artículo de esas notas de entrada", "Sí"],
         ],
+    )
+    _parrafo(
+        doc,
+        "Si el Detalle supera el tope de filas de Excel (1,048,576) se continúa en hojas "
+        "'Detalle PAGOS (2)', '(3)', etc. — nunca se trunca en silencio.",
+        italic=True,
+        size=9,
     )
     doc.add_paragraph()
 
@@ -103,6 +115,10 @@ def main() -> None:
                 "Aún no se clasifica (preliminar)",
                 "Entran las notas con dif_det_ne mayor a 1 peso (umbral configurable)",
             ],
+            [
+                "La nota tenía diferencia pero una devolución COMPENSADA la dejó en ~0",
+                "SALE del Consolidado y queda registrada en la hoja 'Ajustes' (ver sección 4)",
+            ],
         ],
     )
     doc.add_paragraph()
@@ -114,7 +130,11 @@ def main() -> None:
         ["Celda", "Contenido", "De dónde sale"],
         [
             ["Título", "Tiendas Soriana / Proveedor / Validación de Condiciones", "Datos del proveedor"],
-            ["Resultado Auditoría", "Suma de todas las diferencias del Consolidado", "Σ Diferencia = total a reclamar"],
+            [
+                "Resultado Auditoría",
+                "Suma de la columna de diferencia del Consolidado. Si el proveedor tiene devoluciones, suma 'Diferencia Ajustada' (ya neta); si no, 'Diferencia'",
+                "Total a reclamar",
+            ],
             ["Observaciones Auditor", "'Diferencia costos'", "Texto fijo (lo ajusta el auditor)"],
         ],
     )
@@ -146,15 +166,100 @@ def main() -> None:
     )
     _parrafo(
         doc,
-        "En la fila de encabezado, las columnas 'Total Pagado' y 'Debió Pagar' llevan un "
-        "SUBTOTAL(109,...) que suma toda la columna visible tras filtrar.",
+        "En la fila de encabezado, las columnas de importe llevan un SUBTOTAL(109,...) que "
+        "suma toda la columna visible tras filtrar.",
+        italic=True,
+        size=9,
+    )
+    doc.add_paragraph()
+
+    # Ajustes de pago
+    _titulo(doc, "4. Devoluciones de pago: hoja AJUSTES y las 6 columnas extra", ROJO, size=13)
+    _parrafo(
+        doc,
+        "El Line Item de Compras (Audit Tools) no contempla ciertas devoluciones de pago que "
+        "sí anulan diferencias reales: si no se consideran, se le reclama al proveedor algo "
+        "que Soriana ya le descontó. Estas devoluciones viven en otra fuente del sistema y "
+        "son de dos tipos (acordado con Perla y Mónica el 2026-08-04):",
+    )
+    _tabla(
+        doc,
+        ["Tipo", "Qué es", "Cómo se liga al Consolidado"],
+        [
+            ["MR8M", "Devolución que NO referencia nota de entrada ni tienda, solo la factura", "Proveedor + Factura"],
+            ["KG-14", "Ajuste que SÍ trae tienda y nota de entrada", "Nota de entrada + Tienda (= el Folio exacto)"],
+        ],
+    )
+    doc.add_paragraph()
+
+    _parrafo(doc, "Lo decisivo es si la devolución ya se ejecutó o no:")
+    _tabla(
+        doc,
+        ["Estado", "Cómo se detecta", "Qué hace el sistema"],
+        [
+            [
+                "COMPENSADA",
+                "Tiene documento de pago (el cheque ya se generó; Soriana paga por corte semanal, los miércoles)",
+                "SE RESTA de la diferencia del renglón, sin dejarla por debajo de cero. Si la factura toca varios folios, se reparte en cascada sin descontar de más",
+            ],
+            [
+                "NO COMPENSADA",
+                "El documento de pago viene vacío o en 0: el cliente ya lo identificó pero aún no lo ejecuta",
+                "NO se resta. Se marca el renglón con la alerta 'No compensado/ejecutado' + el conteo y el monto pendiente, para que el auditor lo vigile y haga la resta manual cuando se compense",
+            ],
+        ],
+    )
+    _parrafo(
+        doc,
+        "Esa distinción es la razón de ser de la alerta: restar algo que todavía no se pagó "
+        "subestimaría la reclamación (acordado el 2026-08-04).",
+        italic=True,
+        size=9,
+    )
+    doc.add_paragraph()
+
+    _parrafo(doc, "Cuando hay devoluciones, el Consolidado pasa de 15 a 21 columnas. Las 6 nuevas:")
+    _tabla(
+        doc,
+        ["Columna nueva", "Qué es"],
+        [
+            ["Tipo Ajuste", "MR8M, KG, o 'KG+MR8M' si al renglón le tocan los dos"],
+            ["Ajuste Pagos", "Suma de las devoluciones COMPENSADAS aplicadas a ese renglón (va en negativo)"],
+            ["Diferencia Ajustada", "Diferencia + Ajuste Pagos. Es la cifra que de verdad se reclama"],
+            ["Compensado", "Bandera de alerta: 'No compensado/ejecutado' si hay pendientes"],
+            ["Conteo No Compensados", "Cuántas devoluciones pendientes tocan ese renglón"],
+            ["Monto No Compensado", "Cuánto suman esas pendientes (informativo, NO se resta)"],
+        ],
+    )
+    doc.add_paragraph()
+
+    _parrafo(doc, "La hoja 'Ajustes' es la bitácora: una fila por devolución cruzada. Columnas:")
+    _tabla(
+        doc,
+        ["Columna", "Qué es"],
+        [
+            ["Proveedor / Tienda-CEDIS / Nota Entrada / Factura", "Identifican el renglón del Consolidado afectado"],
+            ["Diferencia Original", "La diferencia ANTES de aplicar la devolución"],
+            ["Tipo Ajuste", "MR8M o KG"],
+            ["Compensado", "Sí / No"],
+            ["Ajuste Aplicado", "Cuánto se restó (negativo). Es 0 si no está compensada"],
+            ["Monto No Compensado", "Cuánto quedó pendiente. Es 0 si sí está compensada"],
+            ["Documento Pago / Fecha Pago", "Referencia del pago. Vacíos mientras no se compense"],
+            ["DOC_TEXT", "Texto del documento en el sistema origen, para rastrearlo"],
+        ],
+    )
+    _parrafo(
+        doc,
+        "Nota: si el proveedor no tiene devoluciones —o si no hay conexión a la base al "
+        "generar el archivo— la Validación sale exactamente como antes, con sus 15 columnas y "
+        "sin hoja 'Ajustes'. Nunca falla por esto.",
         italic=True,
         size=9,
     )
     doc.add_paragraph()
 
     # Detalle
-    _titulo(doc, "4. Hoja DETALLE PAGOS (una fila por artículo)", size=13)
+    _titulo(doc, "5. Hoja DETALLE PAGOS (una fila por artículo)", size=13)
     _parrafo(
         doc,
         "Desglose de cada artículo de las notas de entrada del Consolidado. Aquí se ve "
@@ -178,7 +283,7 @@ def main() -> None:
             ["Descripcion", "itmdesc", "Descripción del artículo"],
             ["FactEmpaqu", "fact_empaq", "Factor de empaque (piezas por caja)"],
             ["CantRec", "can_rec", "Cantidad recibida"],
-            ["CtoUnitario_sistema", "ctonto_edi", "Costo unitario (⚠ ver nota abajo)"],
+            ["CtoUnitario_sistema", "ctouni", "Costo unitario del sistema (SAP)"],
             ["Costo Unitario correcto", "cto_aud", "Costo auditado (el menor entre pagado y facturado)"],
             ["Porc_IEPS", "prieps_edi", "% de IEPS facturado"],
             ["IEPS_Aud", "ieps_aud", "Tasa de IEPS auditada"],
@@ -190,7 +295,7 @@ def main() -> None:
     doc.add_paragraph()
 
     # Nota / flujo
-    _titulo(doc, "5. El cálculo de la diferencia, en 4 pasos", ROJO, size=13)
+    _titulo(doc, "6. El cálculo de la diferencia, en 5 pasos", ROJO, size=13)
     _tabla(
         doc,
         ["Paso", "Qué pasa"],
@@ -199,23 +304,24 @@ def main() -> None:
             ["2", "imp_aud = cto_aud × cantidad recibida × (1+IVA) × (1+IEPS) — lo que se DEBIÓ pagar por artículo"],
             ["3", "Se suma imp_aud por nota de entrada → 'Debió Pagar'. Se toma el pago real (máx) → 'Total Pagado'"],
             ["4", "Diferencia = Total Pagado − Debió Pagar. Si es positiva, Soriana pagó de más y se reclama"],
+            ["5", "Se restan las devoluciones YA COMPENSADAS → 'Diferencia Ajustada'. Las pendientes no se restan: se marcan como alerta"],
         ],
     )
     doc.add_paragraph()
 
     nota = doc.add_paragraph()
-    nota.add_run("⚠ Nota a verificar con negocio: ").bold = True
+    nota.add_run("✔ Confirmado con negocio (Mónica, 2026-07-31): ").bold = True
     nota.add_run(
-        "en el Detalle, la columna 'CtoUnitario_sistema' se llena hoy con ctonto_edi (el "
-        "costo del proveedor), no con ctouni (el costo del sistema). Conviene confirmar con "
-        "Luis/Mónica si el rótulo o el origen es el correcto."
+        "en el Detalle, la columna 'CtoUnitario_sistema' se llena con ctouni (el costo del "
+        "sistema/SAP), no con ctonto_edi. Antes salía en cero cuando no había EDI; ya quedó "
+        "corregido."
     ).font.size = Pt(9)
 
     doc.add_paragraph()
     pie = doc.add_paragraph()
     pie.add_run(
         "Generado desde scripts/generar_guia_validacion.py. Fuente: "
-        "automation_cobros/validation_exporter.py y calculations.py."
+        "automation_costos/validation_exporter.py y calculations.py."
     )
     pie.runs[0].italic = True
     pie.runs[0].font.size = Pt(8)

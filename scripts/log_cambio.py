@@ -7,7 +7,7 @@ Uso:
     python scripts/log_cambio.py --tipo codigo \
         --titulo "Conecta CPA Vision con el exportador" \
         --detalle "Se agrega cpa_parquet.leer_lote() para alimentar main.py" \
-        --archivos automation_cobros/cpa_parquet.py main.py
+        --archivos automation_costos/cpa_parquet.py main.py
 """
 
 import argparse

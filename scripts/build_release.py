@@ -4,7 +4,7 @@ Uso:
     python scripts/build_release.py
     python scripts/build_release.py --sin-compilar   # solo re-empaqueta dist/
 
-Deja `dist/Automation Cobros.exe` y `dist/AutomationCobros_<version>_<fecha>.zip`.
+Deja `dist/AutomationCostos.exe` y `dist/AutomationCostos_<version>_<fecha>.zip`.
 """
 
 from __future__ import annotations
@@ -18,9 +18,9 @@ from datetime import datetime
 from pathlib import Path
 
 RAIZ = Path(__file__).resolve().parent.parent
-SPEC = RAIZ / "AutomationCobros.spec"
+SPEC = RAIZ / "AutomationCostos.spec"
 DIST = RAIZ / "dist"
-EXE = DIST / "Automation Cobros.exe"
+EXE = DIST / "AutomationCostos.exe"
 VERSION = "1.0"
 
 # Archivos que acompañan al ejecutable dentro del zip.
@@ -40,7 +40,7 @@ def empaquetar() -> Path:
     if not EXE.exists():
         raise SystemExit(f"No se encontro el ejecutable: {EXE}")
 
-    nombre = f"AutomationCobros_{VERSION}_{datetime.now():%Y%m%d}.zip"
+    nombre = f"AutomationCostos_{VERSION}_{datetime.now():%Y%m%d}.zip"
     destino = DIST / nombre
     print(f"Empaquetando {destino.name}...")
 

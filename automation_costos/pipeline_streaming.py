@@ -32,31 +32,32 @@ from typing import Callable
 import pandas as pd
 
 import config
-from automation_cobros.calculations import (
+from automation_costos.calculations import (
     COMPRAS_COLUMNS,
     apply_display_formula_values,
     prepare_compras_dataframe,
     _invoice_group_key,
 )
-from automation_cobros.cruce_cpa import (
+from automation_costos.cruce_cpa import (
     cargar_cpa,
     cruzar,
     normalizar_factura,
     rfc_de_compras,
     solo_digitos,
 )
-from automation_cobros.database import fetch_compras
-from automation_cobros.excel_exporter import escribir_libro_compras
-from automation_cobros.pipeline import (
+from automation_costos.database import fetch_compras
+from automation_costos.excel_exporter import escribir_libro_compras
+from automation_costos.pipeline import (
     ResultadoPipeline,
     _nombre_base,
     copiar_soportes_cpa,
 )
-from automation_cobros.utils import make_folio_series, to_number
-from automation_cobros.validation_exporter import (
+from automation_costos.utils import make_folio_series, to_number
+from automation_costos.validation_exporter import (
     _COLUMNAS_FUENTE,
     write_validation_from_dataframe,
     write_validation_rapida,
+    write_validation_streaming,
 )
 
 # Renglones sin nota de entrada (rcvnbr nulo) no son auditables a nivel folio y hoy caen en
@@ -196,6 +197,7 @@ def generar_validacion_grande(
     parquet_root: Path | str,
     output_dir: Path | str,
     *,
+    por_mes: bool = False,
     log: Callable[[str], None] = print,
 ) -> ResultadoPipeline:
     """Genera SOLO la Validación consolidada de un proveedor gigante, rápido y sin OOM.
@@ -221,7 +223,8 @@ def generar_validacion_grande(
         folio_acc: pd.DataFrame | None = None
         trozos: list[Path] = []
 
-        for etiqueta, ini, fin in _intervalos_trimestre(start_date, end_date):
+        intervalos = _intervalos_mes(start_date, end_date) if por_mes else _intervalos_trimestre(start_date, end_date)
+        for etiqueta, ini, fin in intervalos:
             log(f"[{etiqueta}] auditables desde SQL + cruce...")
             salida = _salida_intervalo(vendor, ini, fin, parquet_root, filtro_filas=FILTRO_AUDITABLES)
             if salida is None:
@@ -258,26 +261,51 @@ def generar_validacion_grande(
         con_dif = set(dif.index[dif > umbral])
         log(f"[global] {len(folio_acc):,} folios auditables · {len(con_dif):,} con diferencia > {umbral}")
 
-        # Solo las filas de los folios con diferencia, con los totales globales pegados.
-        partes: list[pd.DataFrame] = []
-        for ruta in trozos:
+        # Lee un trozo (trimestre/mes), lo filtra a los folios con diferencia y le pega los
+        # totales globales por folio. Se usa en dos pasadas para NO tener el detalle completo
+        # (millones de renglones) en memoria a la vez.
+        def _enriquecer(ruta: Path) -> pd.DataFrame | None:
             t = pd.read_pickle(ruta)
             folio = make_folio_series(t["strnbr"], t["rcvnbr"])
             t = t[folio.isin(con_dif)]
             if t.empty:
-                continue
+                return None
             folio = make_folio_series(t["strnbr"], t["rcvnbr"])
             t["debio_pagar_ne"] = folio.map(debio).to_numpy()
             t["tot_pagado_ne"] = folio.map(pagado).to_numpy()
             t["dif_det_ne"] = folio.map(dif).to_numpy()
-            partes.append(t)
-        df_dif = pd.concat(partes, ignore_index=True) if partes else pd.DataFrame(columns=columnas)
+            t["folio"] = folio.to_numpy()
+            return t
+
+        # Pasada 1: fuente del Consolidado — un renglón por folio (chico, cabe siempre).
+        src_partes: list[pd.DataFrame] = []
+        for ruta in trozos:
+            t = _enriquecer(ruta)
+            if t is None:
+                continue
+            src_partes.append(t.drop_duplicates(subset="folio", keep="first"))
+            del t
+            gc.collect()
+        if src_partes:
+            consolidado_src = pd.concat(src_partes, ignore_index=True).drop_duplicates(
+                subset="folio", keep="first"
+            )
+        else:
+            consolidado_src = pd.DataFrame(columns=columnas)
+        del src_partes
+
+        # Pasada 2: Detalle en streaming — un trozo a la vez.
+        def _chunks():
+            for ruta in trozos:
+                t = _enriquecer(ruta)
+                if t is not None:
+                    yield t
 
         proveedor_dir = output_dir / base
         proveedor_dir.mkdir(parents=True, exist_ok=True)
         validacion_path = proveedor_dir / f"Validacion_{base}.xlsx"
-        log(f"[validación] escribiendo {len(df_dif):,} renglones de detalle...")
-        write_validation_rapida(df_dif, validacion_path)
+        log(f"[validación] streaming · {len(consolidado_src):,} folios con diferencia (detalle completo)")
+        write_validation_streaming(consolidado_src, _chunks(), validacion_path)
         log(f"[validación] {validacion_path.name}")
 
         soportes = copiar_soportes_cpa(rfc, parquet_root, proveedor_dir, log=log)

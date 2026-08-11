@@ -20,14 +20,14 @@ import pandas as pd
 import xlsxwriter
 
 import config
-from automation_cobros.calculations import (
+from automation_costos.calculations import (
     COMPRAS_COLUMNS,
     EDI_COLUMNS,
     apply_display_formula_values,
     build_pending_edi_dataframe,
     prepare_compras_dataframe,
 )
-from automation_cobros.utils import ensure_parent
+from automation_costos.utils import ensure_parent
 
 HEADER_ROW = 6  # 0-indexed (fila 7 en Excel)
 DATA_ROW = 7  # 0-indexed (fila 8 en Excel)

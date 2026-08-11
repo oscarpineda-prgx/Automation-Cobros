@@ -1,8 +1,8 @@
 # Interfaz gráfica — PRGX Soriana Audit Suite
 
 > **Última actualización:** 2026-07-22
-> **Archivos:** [`automation_cobros/ui.py`](../automation_cobros/ui.py) (presentación) ·
-> [`automation_cobros/app.py`](../automation_cobros/app.py) (aplicación)
+> **Archivos:** [`automation_costos/ui.py`](../automation_costos/ui.py) (presentación) ·
+> [`automation_costos/app.py`](../automation_costos/app.py) (aplicación)
 
 ---
 
@@ -38,14 +38,14 @@ suite sin arrastrar dependencias.
 - **Bitácora** con timestamp en gris y el mensaje coloreado según sea info, ok o error.
 
 ### Assets
-`automation_cobros/assets/` — `prgx-icon.png`, `prgx-icon.ico`, `Soriana-Logo.png`
+`automation_costos/assets/` — `prgx-icon.png`, `prgx-icon.ico`, `Soriana-Logo.png`
 (copiados de Panoptic para mantener la identidad).
 
 ## 4. Estructura de la pantalla
 
 ```
 ┌──────────────────────────────────────────────────────────┐
-│ [PRGX] Automation Cobros            [Soriana]  [🌙 Tema] │  encabezado
+│ [PRGX] Automation Costos            [Soriana]  [🌙 Tema] │  encabezado
 ├──────────────────────────────────────────────────────────┤
 │ Proveedor · Desde · Hasta · Salida            [Elegir]   │  barra de configuración
 ├───────────────────────────┬──────────────────────────────┤
@@ -98,11 +98,11 @@ python scripts/build_release.py                 # compila y empaqueta
 python scripts/build_release.py --sin-compilar  # solo re-empaqueta dist/
 ```
 
-Produce `dist/Automation Cobros.exe` y `dist/AutomationCobros_<version>_<fecha>.zip`.
+Produce `dist/AutomationCostos.exe` y `dist/AutomationCostos_<version>_<fecha>.zip`.
 
 El `.spec` se actualizó para incluir lo que PyInstaller no detecta solo:
 
-- `collect_submodules("automation_cobros")` — los subcomandos de `main.py` importan dentro
+- `collect_submodules("automation_costos")` — los subcomandos de `main.py` importan dentro
   de funciones y el análisis estático no los ve.
 - `collect_data_files("customtkinter")` — customtkinter carga sus temas JSON en runtime.
 - La carpeta `assets` y `templates`.

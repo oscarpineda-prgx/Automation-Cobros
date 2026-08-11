@@ -29,22 +29,43 @@ dentro de las fórmulas de Excel.
 
 ## 3. Regla central del costo auditado
 
-En `calculations.recalculate_dataframe()`:
+En `calculations.recalculate_dataframe()`. La bandera que gobierna las tres columnas
+auditadas es **"¿la fila cruzó con CPA Vision?"** — es decir, si trae CFDI. Se detecta por
+la **presencia real** de `uuid` o `ctonto_edi` (celda con dato), **no** por que el valor
+sea distinto de cero (ver §3.1).
 
 ```
-cto_aud = ctonto_edi   si hay EDI y ctonto_edi < ctouni
-        = ctouni       en cualquier otro caso
+Si la fila CRUZÓ con CPA (hay CFDI):
+    cto_aud  = min(ctonto_edi, ctouni)   (el menor; pero nunca 0, ver abajo)
+    iva_aud  = poriva_edi                (aunque sea 0)
+    ieps_aud = prieps_edi                (aunque sea 0)
+
+Si la fila NO cruzó (sin CFDI):
+    cto_aud  = ctouni                    (el del sistema; no se pone 0 al costo)
+    iva_aud  = iva_t007s                 (tasa SAP)
+    ieps_aud = ieps_t007s               (tasa SAP)
 ```
 
 **Si el proveedor facturó un costo MENOR al de sistema, el correcto es el del proveedor.**
-Es una regla conservadora: **solo corrige a la baja**, nunca al alza.
-
-Las tasas (`iva_aud`, `ieps_aud`) salen del EDI si existe; si no, caen a las tasas SAP
-de la tabla `T007S`.
+Es una regla conservadora: **solo corrige a la baja**, nunca al alza. El costo del CFDI
+solo gana si es válido (`ctonto_edi > 0`) y menor a `ctouni`; nunca se deja el costo en 0.
 
 ```
 imp_aud = cto_aud × can_rec × (1 + iva_aud) × (1 + ieps_aud)
 ```
+
+### 3.1 Por qué la bandera es "cruzó", no "valor ≠ 0"  — reunión 2026-07-31
+
+Acuerdo con **Mónica López** y **Perla Maya**:
+
+- **Lo que prima es la factura.** Si la información se ligó con CPA Vision, los tres campos
+  auditados toman lo del CFDI, *aunque el impuesto facturado sea 0*. Ejemplo: cruzó y
+  `poriva_edi = 0` → `iva_aud = 0`, aunque `iva_t007s` traiga 0.16.
+- **Si NO se ligó nada de EDI**, no se puede deducir que el impuesto es 0 ni poner el costo
+  en 0 (generaría una diferencia falsa que no podemos justificar): se deja lo del sistema
+  (`cto_aud = ctouni`, `iva_aud = iva_t007s`, `ieps_aud = ieps_t007s`).
+
+Detalle en [reuniones/005-2026-07-31-costo-impuestos-cruce.md](reuniones/005-2026-07-31-costo-impuestos-cruce.md).
 
 ## 4. Los dos niveles de agregación
 
@@ -291,7 +312,7 @@ Selecta, con los mismos conteos que la otra base— **pero esa información no e
 a veces está incompleta.** De esa base se toma **únicamente 2025**; el resto del periodo
 sale siempre de `SORIANA_PROJECTS`.
 
-Implementado en `FUENTES_COMPRAS` ([database.py](../automation_cobros/database.py)), que
+Implementado en `FUENTES_COMPRAS` ([database.py](../automation_costos/database.py)), que
 recorta el periodo pedido contra el rango de cada fuente. **No ampliar esos rangos:** no
 solo duplicaría renglones, metería datos parciales en la auditoría.
 
@@ -303,7 +324,7 @@ Lista viva. Cada punto debe cerrarse con Mónica o Luis.
 
 | # | Tema | Estado |
 |---|---|---|
-| C1 | **¿El criterio de `costo OUT` que está en el código es el original de Data Services?** El código hace `si hay EDI y ctonto_edi < ctouni → ctonto_edi` (§3). **Luis confirmó la mitad** en la reunión 003 (R14): si el EDI está vacío se toma `costo UNI`. **Sigue sin confirmarse** que con ambos valores presentes gane siempre el menor. | 🟡 Parcial |
+| C1 | **¿El criterio de `costo OUT` que está en el código es el original de Data Services?** El código hace `si cruzó CPA y ctonto_edi < ctouni → ctonto_edi; si no → ctouni` (§3). | ✅ **CERRADO** por reunión 005 (2026-07-31, Mónica/Perla): sin cruce se deja `ctouni` (nunca 0); con cruce gana el menor. La bandera es "¿cruzó CPA?" (presencia de CFDI), no "valor ≠ 0", y los impuestos del CFDI se respetan aunque sean 0 (§3.1). |
 | C2 | **Regla completa del IEPS/IVA.** | ✅ **CERRADO** por R18 (reunión 003). La fuente de verdad es la factura: si el proveedor factura el impuesto se actualiza el sistema; si no lo factura, cero; si la factura no muestra porcentaje, no se registra. |
 | C3 | **IVA clavado en `0.16` en la fórmula de Excel** (§8.2) contra un IEPS real de hasta 53% (R4). El Excel entregado al proveedor puede traer números mal en productos con IEPS. | 🔴 Abierto — riesgo alto |
 | C4 | **Clasificación de la diferencia.** R4 da tres orígenes (faltante / costo / impuestos); el código usa cuatro etiquetas (`dif costos` / `sin diferencia` / `sobrepago` / `faltante`). **No empatan** y la regla nunca se cerró (§5). | 🔴 Abierto |
@@ -323,3 +344,125 @@ Lista viva. Cada punto debe cerrarse con Mónica o Luis.
 > Vision** —botones, selecciones, filtros, formato de solicitud, paralelismo— **está resuelto
 > y verificado**. No volver a levantarlo como pendiente. Lo documentado en la reunión 003 se
 > conserva solo como referencia histórica.
+
+---
+
+## 11. Ajustes de pagos MR8M y KG-14 (acordado 2026-08-04, reunión 006)
+
+El Line Item de Compras (Audit Tools) **no contempla ciertas devoluciones/ajustes de pago**
+que sí anulan diferencias reales. Viven en `SORIANA_PROJECTS.dbo.F_APV2` y se aplican como
+**paso extra** al Consolidado de la Validación de Condiciones.
+Implementado en [`ajustes_pagos.py`](../automation_costos/ajustes_pagos.py), integrado en
+[`validation_exporter.py`](../automation_costos/validation_exporter.py).
+
+**Consulta base:**
+```sql
+SELECT * FROM SORIANA_PROJECTS.dbo.[F_APV2](@proveedor, @inicio, @fin)
+```
+
+**Dos tipos de devolución** (importe en `GrsInvAmt`, siempre negativo):
+
+| Tipo | Cómo se identifica | Llave de cruce con el Consolidado |
+|---|---|---|
+| **MR8M** | `DOC_TEXT = 'MR8M'` | `VndNbr + InvNbr` ↔ **Proveedor + Factura** (no trae tienda ni nota) |
+| **KG-14** | `COD_TYPE_CODE = 'KG'` y `BSAK_BSIK_XREF3 LIKE '14%'` | `RcpNbr + StrNbr` ↔ **Nota de entrada + Tienda** (= el folio del Consolidado; corrección 2026-08-04) |
+
+**Reglas según el estado de compensación (`ChkNbr`):**
+
+1. **Compensada** (`ChkNbr` con valor = el pago ya fue efectivo): el importe (`GrsInvAmt`,
+   negativo) **se consume contra la diferencia disponible** del renglón cruzado, sin dejarla
+   por debajo de 0. Si una factura MR8M cae en varios folios, se reparte en cascada.
+2. **No compensada** (`ChkNbr` vacío o `0` = identificado por el cliente pero **aún no
+   ejecutado**): **no se resta**. El renglón cruzado se **marca como alerta**
+   ("No compensado/ejecutado") con el conteo y el monto pendiente, para que el auditor vigile
+   esa factura/nota en el sistema del cliente y haga la resta manual cuando se compense
+   (acordado 2026-08-04, reunión 007). Ej. real 741: la factura 12244 (`ChkNbr` vacío,
+   −$155,020.78) conserva su diferencia y queda marcada.
+3. `cto/iva/ieps` **no se tocan**: esto opera sobre la **diferencia de pago** del Consolidado,
+   no sobre el costo auditado (§3).
+
+**Salida (Validación de Condiciones):**
+
+- Al **Consolidado** se le agregan seis columnas: `Tipo Ajuste` (MR8M / KG / MR8M+KG),
+  `Ajuste Pagos` (suma compensada aplicada, negativa), `Diferencia Ajustada` (= `Diferencia` +
+  `Ajuste Pagos`), `Compensado` (bandera "No compensado/ejecutado" cuando aplica),
+  `Conteo No Compensados` (# de devoluciones pendientes que cruzan el renglón) y
+  `Monto No Compensado` (suma pendiente).
+- Los renglones que una devolución **compensada** deja en ~0 **desaparecen del Consolidado**
+  y quedan en la hoja **"Ajustes"**. Los que solo tienen devoluciones **no compensadas**
+  **se quedan** en el Consolidado con su diferencia intacta y la bandera de alerta.
+- La hoja **"Ajustes"** es la bitácora de cada devolución cruzada (compensada o pendiente):
+  factura, tienda, nota, `Compensado` (Sí/No), monto aplicado o pendiente, `ChkNbr`, `DOC_TEXT`.
+- Si el proveedor no tiene devoluciones o la BD no está disponible, la Validación se genera
+  **igual que antes** (sin columnas extra ni hoja Ajustes): es un paso aditivo y seguro.
+
+Detalle y evidencia en [reuniones/006-2026-08-04-ajustes-pagos-mr8m-kg.md](reuniones/006-2026-08-04-ajustes-pagos-mr8m-kg.md)
+y [reuniones/007-2026-08-04-alerta-no-compensados.md](reuniones/007-2026-08-04-alerta-no-compensados.md).
+
+---
+
+## 12. Periodo a descargar/ejecutar — margen 2026 (acordado 2026-08-05, reunión 008)
+
+El periodo "2025" **arrastra a 2026** por facturas subidas tarde y pagos con plazo de hasta
+90 días. Hay **dos cortes distintos**:
+
+| Proveedor se trabaja como | **Compras / ejecución** (`--start`..`--end`) | **CPA (descarga)** |
+|---|---|---|
+| **2020-2024** | 2020-01-01 .. 2024-12-31 | años 2020-2024 completos |
+| **2025** | 2025-01-01 .. **2026-03-31** | 2025 completo + **solo ENE 2026** |
+| **2020-2025** | 2020-01-01 .. **2026-03-31** | 2020-2025 + **solo ENE 2026** |
+
+- **Compras (SQL):** `FUENTES_COMPRAS` extiende `SORIANA_2025_PROJECTS` a 2026 (límite
+  **superior**; seguro, no hay otra fuente 2026). Ejecutar con `--end 2026-03-31` (corte
+  actual de la info: la base tiene 2026 cargado hasta ~marzo). ⚠️ El límite **inferior** de esa
+  base sigue prohibido (2022-2024 incompletos ahí; §10 C-histórico). No duplica años.
+- **CPA (CFDIs):** el portal tiene malla por **mes**. Cuando el periodo incluye 2025 se marca,
+  además de los años completos, **solo enero 2026** (celda del mes, no el año 2026 entero) —
+  `cpa_vision._set_month_checkbox` + `_MES_MARGEN=(2026,1)`. **No** cambia el `FECHAS` de los
+  lotes: el scraper agrega enero 2026 solo. Máxima descarga por proveedor: **31-ene-2026**.
+- **Por qué distinto:** CFDIs = facturas emitidas poco después de la compra (+1 mes margen);
+  compras/pagos = hasta 90 días (marzo). Las compras feb-mar 2026 sin CFDI quedan sin EDI —
+  la extensión a marzo es por el **pago**, no por nuevas facturas.
+
+Detalle en [reuniones/008-2026-08-05-periodo-margen-2026.md](reuniones/008-2026-08-05-periodo-margen-2026.md).
+
+## 13. Enfoque de descarga por cobertura <90% (acordado 2026-08-10, reunión 009)
+
+**Cambio de criterio.** Ya no se descarga "todo el historial de cada proveedor pendiente por
+prioridad". Se descarga **solo proveedor+año con cobertura EDI < 90%**, según el archivo
+**"Planeacion vs %EDI poblado Soriana.xlsx"** (una fila por proveedor–año), columna `acción`:
+
+| `acción` | Significado | Cobertura |
+|---|---|---|
+| **Descargar/Ejecutar** | 👉 descargar ese año de CPA | siempre <90% |
+| Ejecutar | ejecutar directo, sin descargar | ≥90% |
+| ninguna | no tocar (o ya "Terminado" 2020-2024) | mixto |
+
+**Reglas operativas.**
+- **Granularidad por año.** `FECHAS` del lote lleva los años sueltos <90% de cada proveedor
+  (ej. `"2021 2022 2025"`). El scraper agrega enero-2026 solo cuando 2025 está presente (§12).
+- **Fuente de verdad = parquet** (`outputs/cpa_vision/parquet`, partición `rfc/year`). Se
+  excluye todo proveedor-año ya presente. NUNCA se confía en CSV/métricas (ver §"Validar datos").
+- **Orden** = misma prioridad definida (`Prioridad_Proveedores_CPA.xlsx`); los ausentes, al final.
+- **Extranjeros sin RFC** (LLC, LTD, GmbH…): no emiten CFDI mexicano → imposible por CPA. Se
+  reportan aparte, no se descargan.
+- **Un solo parquet**; copiar lo descargado a la carpeta de Data Services (Fase 3, la hace Óscar).
+  Los proveedores ya descargados que quedaron ≥90% **no se eliminan**.
+
+**Definiciones (validadas contra los conteos de Mónica).**
+- `reg_compras` = renglones de `F_COMPRAS` con `cod_tipo_mvto` **distinto de 161 y 162**.
+- **El año se define por `rcvdt`** (fecha de recibo). Reproduce exacto `reg_compras` de Mónica.
+- Cobertura EDI = renglones con `ctonto_edi <> 0` / `reg_compras`.
+
+**Indicador de beneficio por año** (`scripts/beneficio_cpa.py`). Por proveedor-año:
+- cobertura **antes** = `ctonto_edi<>0` tal como viene de la base (EDI del cliente);
+- cobertura **después** = `ctonto_edi<>0` tras cruzar con el parquet CPA;
+- beneficio = después − antes (puntos porcentuales y renglones ganados).
+- Validado: Selecta (741) "antes" 2020-2024 = 20.86% (idéntico a Mónica). El "después" mide el
+  cruce real; en 2020 casi no sube porque los CFDIs bajados no ligan por barcode+factura
+  (hallazgo de calidad de datos, no defecto del cálculo).
+
+**Scripts.** `scripts/gen_lote_monica.py` (genera el maestro `descarga_monica_pendientes.xlsx`
++ `reporte_monica_extranjeros.xlsx`) y `scripts/beneficio_cpa.py`.
+
+Detalle en [reuniones/009-2026-08-10-enfoque-cobertura-90-monica.md](reuniones/009-2026-08-10-enfoque-cobertura-90-monica.md).

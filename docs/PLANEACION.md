@@ -39,7 +39,7 @@ Lo que parecía un bloqueo era una **base distinta**. `F_COMPRAS` existe en dos 
 `fetch_compras()` ahora **une las dos automáticamente**: si el periodo pedido cruza el límite
 (p. ej. 2020–2025) hace **dos consultas** —cada una recortada a su rango de años— y concatena.
 Si solo toca un rango, hace una sola. Es transparente para todos los proveedores; el auditor
-no elige la base. Ver [database.py](../automation_cobros/database.py) (`FUENTES_COMPRAS`).
+no elige la base. Ver [database.py](../automation_costos/database.py) (`FUENTES_COMPRAS`).
 
 > ⚠️ **`SORIANA_2025_PROJECTS` también devuelve 2022-2024, pero esos años están
 > INCOMPLETOS** (Óscar, 2026-07-24). De esa base se toma **solo 2025**; todo lo anterior

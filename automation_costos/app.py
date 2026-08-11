@@ -1,4 +1,4 @@
-"""GUI de Automation Cobros — PRGX Soriana Audit Suite.
+"""GUI de Automation Costos — PRGX Soriana Audit Suite.
 
 Dos etapas:
 
@@ -22,18 +22,21 @@ import customtkinter as ctk
 from PIL import Image
 
 import config
-from automation_cobros import ui
-from automation_cobros.database import fetch_compras, test_connection
-from automation_cobros.excel_exporter import write_compras_workbook
-from automation_cobros.recalculate import recalculate_compras_file
-from automation_cobros.utils import clean_code, safe_filename
-from automation_cobros.validation_exporter import write_validation_workbook
+from automation_costos import ui
+from automation_costos.database import fetch_compras, resolver_rfc, test_connection
+from automation_costos.excel_exporter import write_compras_workbook
+from automation_costos.recalculate import recalculate_compras_file
+from automation_costos.utils import clean_code, safe_filename
+from automation_costos.validation_exporter import write_validation_workbook
 
 _TOKENS_ERROR = ("error", "exception", "traceback")
-_TOKENS_OK = ("generado", "generada", "correcta", "completad", "cruzados", "salida:")
+_TOKENS_OK = (
+    "generado", "generada", "correcta", "completad", "cruzados", "salida:",
+    "descargado", "parquet.", "✓",
+)
 
 
-class CobrosApp(ctk.CTk):
+class CostosApp(ctk.CTk):
     def __init__(self) -> None:
         super().__init__()
         self.tema = ui.Tema("light")
@@ -50,6 +53,8 @@ class CobrosApp(ctk.CTk):
         self.archivo_recalculado = ctk.StringVar(value="")
         self.rfc = ctk.StringVar(value="")
         self.carpeta_parquet = ctk.StringVar(value=str(config.OUTPUT_DIR / "cpa_vision" / "parquet"))
+        self.cpa_usuario = ctk.StringVar(value=config.CPA_VISION_USER)
+        self.cpa_password = ctk.StringVar(value=config.CPA_VISION_PASSWORD)
 
         ctk.set_appearance_mode(self.tema.modo)
         ctk.set_default_color_theme("dark-blue")
@@ -61,7 +66,7 @@ class CobrosApp(ctk.CTk):
     # -- Ventana ------------------------------------------------------------
 
     def _configurar_ventana(self) -> None:
-        self.title("Automation Cobros — PRGX")
+        self.title("Automation Costos — PRGX")
         self.geometry("1160x900")
         self.minsize(1000, 740)
         self.configure(fg_color=self.tema("bg1"))
@@ -103,7 +108,7 @@ class CobrosApp(ctk.CTk):
         titulo.grid(row=1, column=1, sticky="w", pady=10)
         ctk.CTkLabel(
             titulo,
-            text="Automation Cobros",
+            text="Automation Costos",
             font=ctk.CTkFont(ui.FUENTE, 17, weight="bold"),
             text_color=self.tema("t1"),
         ).pack(anchor="w")
@@ -147,6 +152,7 @@ class CobrosApp(ctk.CTk):
         ui.campo(barra, self.tema, etiqueta="Hasta", variable=self.fecha_final, ancho=110)
         ui.campo(barra, self.tema, etiqueta="Salida", variable=self.carpeta_salida, ancho=300)
         ui.boton_secundario(barra, self.tema, texto="Elegir", comando=self._elegir_salida)
+        ui.boton_secundario(barra, self.tema, texto="↺  Limpiar", comando=self._limpiar_campos)
 
     # -- Tarjetas -----------------------------------------------------------
 
@@ -198,16 +204,35 @@ class CobrosApp(ctk.CTk):
             card,
             self.tema,
             titulo="ETAPA 2",
-            subtitulo="CPA Vision · Rellena las columnas EDI",
+            subtitulo="CPA Vision · Descarga de CFDI y salida final",
             insignia="02",
         )
+
+        # Credenciales del portal: las teclea el auditor, nunca se guardan en código.
+        fila_user = ctk.CTkFrame(card, fg_color="transparent")
+        fila_user.pack(fill="x", padx=14)
+        ui.campo(fila_user, self.tema, etiqueta="Usuario CPA", variable=self.cpa_usuario, ancho=230)
+        fila_pass = ctk.CTkFrame(card, fg_color="transparent")
+        fila_pass.pack(fill="x", padx=14)
+        ui.campo(
+            fila_pass, self.tema, etiqueta="Contraseña", variable=self.cpa_password,
+            ancho=230, show="*",
+        )
+
+        ui.boton_principal(
+            card, self.tema, self.indicadores,
+            texto="⬇  Descargar de CPA Vision", clave="descarga",
+            comando=self._descargar_cpa,
+        )
+        ui.pista(card, self.tema, "Trae los CFDI del portal y arma el Parquet (RFC automático)")
+        ui.separador(card, self.tema)
+
         ui.boton_principal(
             card, self.tema, self.indicadores,
             texto="▶  Generar salida completa (1 clic)", clave="salida",
             comando=self._generar_salida,
         )
         ui.pista(card, self.tema, "Compras → cruce → recálculo → Validación, de corrido")
-        ui.pista(card, self.tema, "Usa Proveedor y fechas de la barra superior")
         ui.separador(card, self.tema)
         ui.boton_paso(
             card, self.tema, self.indicadores,
@@ -349,6 +374,20 @@ class CobrosApp(ctk.CTk):
 
     # -- Acciones -----------------------------------------------------------
 
+    def _limpiar_campos(self) -> None:
+        """Refresca los campos que cambian por proveedor, para preparar la siguiente corrida.
+
+        Limpia proveedor, RFC y los archivos seleccionados. **Conserva** las fechas, la carpeta
+        de salida, el Parquet y las credenciales de CPA Vision (valores que suelen repetirse
+        entre proveedores de una misma sesión).
+        """
+        self.proveedor.set("")
+        self.rfc.set("")
+        self.archivo_editado.set("")
+        self.archivo_recalculado.set("")
+        self.indicadores.limpiar_estados()
+        self._log("Campos limpiados (se conservan fechas, salida, Parquet y credenciales).")
+
     def _probar_conexion(self) -> None:
         def tarea() -> None:
             test_connection()
@@ -403,6 +442,52 @@ class CobrosApp(ctk.CTk):
 
         self._ejecutar("validar", "Generando Validación de Condiciones...", tarea)
 
+    def _descargar_cpa(self) -> None:
+        proveedor = self.proveedor.get().strip()
+        inicio = self.fecha_inicial.get().strip()
+        fin = self.fecha_final.get().strip()
+        if not (proveedor and inicio and fin):
+            messagebox.showerror("Datos incompletos", "Captura proveedor, fecha inicial y fecha final.")
+            return
+        usuario = self.cpa_usuario.get().strip()
+        password = self.cpa_password.get()
+        if not (usuario and password):
+            messagebox.showerror(
+                "Credenciales CPA Vision", "Captura el usuario y la contraseña de CPA Vision."
+            )
+            return
+        parquet = Path(self.carpeta_parquet.get().strip())
+        rfc_forzado = self.rfc.get().strip().upper()
+
+        def tarea() -> None:
+            from automation_costos.cpa_descarga import descargar_cpa_proveedor
+
+            rfc = rfc_forzado
+            if not rfc:
+                self._log("Resolviendo el RFC del proveedor desde SQL Server...")
+                rfc = resolver_rfc(proveedor, inicio, fin)
+                if not rfc:
+                    self._log(
+                        "ERROR: no se pudo resolver el RFC (¿el proveedor no tiene compras en el periodo?)."
+                    )
+                    return
+                self.rfc.set(rfc)
+            self._log(f"RFC del proveedor: {rfc}")
+
+            resultado = descargar_cpa_proveedor(
+                rfc, inicio, fin,
+                parquet_root=parquet,
+                username=usuario,
+                password=password,
+                log=self._log,
+            )
+            self.carpeta_parquet.set(str(resultado.parquet_root))
+            self._log(
+                f"✓ CPA Vision descargado: {resultado.filas:,} filas listas en el Parquet."
+            )
+
+        self._ejecutar("descarga", "Descargando de CPA Vision (abre el portal)...", tarea)
+
     def _generar_salida(self) -> None:
         proveedor = self.proveedor.get().strip()
         inicio = self.fecha_inicial.get().strip()
@@ -416,7 +501,7 @@ class CobrosApp(ctk.CTk):
             return
 
         def tarea() -> None:
-            from automation_cobros.pipeline import generar_salida_proveedor
+            from automation_costos.pipeline import generar_salida_proveedor
 
             resultado = generar_salida_proveedor(
                 proveedor, inicio, fin, parquet, self.carpeta_salida.get().strip() or config.OUTPUT_DIR,
@@ -439,7 +524,7 @@ class CobrosApp(ctk.CTk):
         rfc_forzado = self.rfc.get().strip().upper() or None
 
         def tarea() -> None:
-            from automation_cobros.cruce_cpa import cruzar_proveedor
+            from automation_costos.cruce_cpa import cruzar_proveedor
 
             resultado, rfc = cruzar_proveedor(entrada, parquet, rfc=rfc_forzado)
             self._log(f"RFC del proveedor: {rfc}")
@@ -491,7 +576,7 @@ class CobrosApp(ctk.CTk):
 
 
 def run_app() -> None:
-    CobrosApp().mainloop()
+    CostosApp().mainloop()
 
 
 def _nombre_compras(df, proveedor: str) -> str:

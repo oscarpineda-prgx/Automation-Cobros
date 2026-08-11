@@ -1,4 +1,4 @@
-# CLAUDE.md — Automation-Cobros
+# CLAUDE.md — Automation-Costos
 
 > **Índice maestro del proyecto.** Este archivo se carga automáticamente al inicio de cada
 > sesión de Claude Code. Si el chat se cierra o se borra, leyendo este archivo y los que
@@ -10,7 +10,7 @@
 
 ## 1. Qué es este proyecto
 
-Automatización del proceso de cobros de la auditoría Soriana 2020–2024 (PRGX).
+Automatización del proceso de costos de la auditoría Soriana 2020–2024 (PRGX).
 Pipeline en dos etapas que **todavía no están conectadas**:
 
 1. **SQL → Excel**: consulta de datos de compras/convenios y exportación a plantillas Excel.
@@ -49,7 +49,7 @@ Lee estos archivos en este orden para ponerte al día:
 ```
 main.py                        Punto de entrada / subcomandos de terminal
 config.py                      Rutas, credenciales, parámetros
-automation_cobros/
+automation_costos/
   app.py                       GUI (customtkinter) — Etapa 1 + Etapa 2 (cruce CPA Vision)
   ui.py                        Tema visual PRGX y widgets (sin lógica de negocio)
   assets/                      prgx-icon.png/.ico, Soriana-Logo.png
@@ -63,6 +63,7 @@ automation_cobros/
   cpa_parquet.py               ZIP -> dataset Parquet particionado
   cpa_consolidator.py          Consolidación de salidas CPA
   cruce_cpa.py                 🔑 Cruce CPA Vision -> Compras (llena el bloque EDI)
+  ajustes_pagos.py             🔑 Devoluciones MR8M/KG-14 (F_APV2) que anulan diferencias
 scripts/
   log_cambio.py                Helper que estampa fecha/hora en la bitácora
   validar_formulas_impuesto.py Doble validación de las fórmulas de impuesto (DuckDB)

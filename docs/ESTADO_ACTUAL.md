@@ -1,16 +1,57 @@
 # Estado actual del proyecto
 
-> **Última actualización:** 2026-07-26
+> **Última actualización:** 2026-08-11
 > Actualizar este archivo al cerrar cada sesión de trabajo.
 
 ---
 
+> ✅ **CERRADO (2026-08-11): renombre Cobros → Costos completo.** La carpeta raíz ya es
+> `Automation-Costos` y el checklist de validación de [BITACORA.md](BITACORA.md) pasó entero
+> (CLI con sus 17 subcomandos, imports, `py_compile`, parquet con 350 RFC, renombres como `R`
+> en git). Los artefactos `build/` y `dist/` se regeneraron con el nombre nuevo.
+>
+> El `.venv` heredado de la ruta vieja (con `pip.exe` y `pyinstaller.exe` rotos) **ya se
+> recreó** el 2026-08-11 y quedó verificado. ⚠️ Al recrearlo, hacerlo siempre desde una
+> terminal **sin el entorno activado**, o Windows bloquea `python.exe` y el entorno queda a
+> medias — ver la entrada del 2026-08-11 en [BITACORA.md](BITACORA.md).
+
 # 🎯 Dónde vamos ahora mismo
 
-**Cerrando los 6 proveedores URGENTES de punta a punta.** Los 6 están descargados de CPA
-Vision y el pipeline corre en un solo comando (elige solo cómo procesar según el tamaño).
+**Descargando de CPA Vision el objetivo de cobertura <90% de Mónica** (correo 2026-08-10,
+[reunión 009](reuniones/009-2026-08-10-enfoque-cobertura-90-monica.md)). Ya no se descarga
+"todo el historial por prioridad": solo **proveedor+año con `% poblado EDI` < 90 %**.
 
-## Los 6 urgentes
+## 📊 Corte al 2026-08-11 (medido contra el parquet, no contra CSV)
+
+| Concepto | Valor |
+|---|---:|
+| Objetivo (`acción = Descargar/Ejecutar`) | **416** filas prov-año / **246** proveedores |
+| Ya cubiertas en parquet | **167** filas · 109 proveedores completos |
+| 🌎 Extranjeros sin RFC (imposible por CPA) | **17** proveedores |
+| **Faltan** | **232** filas / **120** proveedores |
+
+Faltantes por año: 2020→30 · 2021→44 · 2022→45 · 2023→41 · 2024→9 · 2025→63.
+(El 2026-08-10 en la mañana eran 104 cubiertas / 295 faltantes / 159 proveedores.)
+
+**Acervo total en `outputs/cpa_vision/parquet`:** 350 RFC (337 con datos), **809** pares
+RFC-año, **86,978,317** conceptos, **9,788,880** CFDI, 1.9 GB de Parquet (4.9 GB con los ZIP).
+Inventario detallado: `Inventario_CPA_Vision.xlsx`.
+
+**Tiempos** (22 archivos `cpa_batch_metrics_*.csv`, 378 intentos): mediana **3m 43s** por
+proveedor, media **9m 32s**, p90 **17m**; 190.3 h de reloj acumuladas. Éxito real **336/378
+= 88.9 %** (⚠️ `METRICAS_TOTALES.txt` reporta 76.5 % porque cuenta los 47
+`downloaded_after_recovery` como error, siendo descargas buenas).
+
+## 📈 Indicador de beneficio por año (pedido de Mónica)
+
+`scripts/beneficio_cpa.py` (cobertura antes/después por proveedor-año) y
+`scripts/actualizar_plan_beneficio.py`, que vuelca el "después" sobre el archivo de Mónica
+respetando su estructura → **`Planeacion vs %EDI poblado Soriana_ACTUALIZADO.xlsx`** con
+`edi_despues`, `pct_despues`, `mejora_pp`, `renglones_ganados`. Corrida 2026-08-11:
+**1,781 de 4,202** filas prov-año con beneficio calculado (312 proveedores); el resto queda
+en blanco porque esos proveedores todavía no se descargan.
+
+## Los 6 urgentes (histórico — cerrados el 2026-07-27)
 
 | Proveedor | Nombre | Renglones | Compras + Validación |
 |---|---|---:|---|
@@ -71,16 +112,25 @@ proyecto **y** en la carpeta de auditores donde Óscar los pega para el equipo. 
   auditores) → liberó ~12.6 GB.
 - Las **descargas** de CPA Vision siguen yendo a `outputs/cpa_vision` (`--download-dir`).
 
-## 📥 Descargas prioritarias pendientes
+## 📥 Cómo se descarga hoy (modo Mónica)
 
-De los **59 prioritarios** del master (col X), solo **6 tienen CPA descargada** (los 6
-urgentes); **53 pendientes**. Primer lote de 10 en `descarga_prioritarios_lote1.xlsx`:
+El maestro es **`descarga_monica_pendientes.xlsx`** (lo genera `scripts/gen_lote_monica.py`:
+una fila por proveedor, `FECHAS` = los años sueltos <90 %, ordenado por prioridad,
+excluyendo lo que ya está en parquet). Se pagina con `--start-index`:
+
 ```bash
-.venv/Scripts/python.exe main.py cpa-batch-vendors --input descarga_prioritarios_lote1.xlsx \
-    --user <USUARIO_CPA> --password <PASSWORD_CPA> --batch-size 10 \
+.venv/Scripts/python.exe main.py cpa-batch-vendors --input descarga_monica_pendientes.xlsx \
+    --start-index 0 --batch-size 50 \
+    --user <USUARIO_CPA> --password <PASSWORD_CPA> \
     --download-dir outputs/cpa_vision --parquet-dir outputs/cpa_vision/parquet \
     --browser-channel msedge
 ```
+
+> ⚠️ **No regenerar el maestro a media paginación**: `gen_lote_monica.py` reordena y
+> reindexa el archivo, y `--start-index` dejaría de apuntar a donde iba.
+
+> El criterio anterior (59 prioritarios del master, col X) quedó **superado** por el enfoque
+> <90 %. Los lotes `descarga_prioritarios_lote*.xlsx` se borraron el 2026-08-10.
 
 **Arca y Pepsico (2026-07-27):** procesar un año/trimestre completo con los Compras agotaba
 la RAM (11.5M compras + 2.9M CPA; además acumulaba en RAM las filas con diferencia). Se
@@ -103,7 +153,7 @@ quieren los Compras por trimestre de Arca/Pepsico.
 `generar_salida_proveedor` hace un `COUNT` barato y elige:
 - **≤ 2.5M renglones:** camino normal, todo en memoria (rápido). Ej. Selecta, Celaya, Nestlé.
   → un `Compras_<base>.xlsx` (o por año si es grande) + Validación.
-- **> 2.5M:** **procesamiento por trimestre** ([pipeline_streaming.py](../automation_cobros/pipeline_streaming.py)),
+- **> 2.5M:** **procesamiento por trimestre** ([pipeline_streaming.py](../automation_costos/pipeline_streaming.py)),
   para no agotar la RAM (un año no cabe: 1.6M compras + 2.9M CPA). Ej. Arca (11.5M), Pepsico
   (10.1M). → un `Compras_<base>_<año>-T<n>.xlsx` **por trimestre** (~24) + **una** Validación
   consolidada. Da resultados **idénticos** al camino normal (verificado con Selecta y Nestlé).
@@ -177,11 +227,12 @@ en `ATL20AF2222SQ19` con Trusted_Connection. **Toda la lógica de joins vive en 
 
 ## Etapa B — Extracción masiva de CFDI desde CPA Vision
 
-**Estado: los 6 urgentes descargados.** Playwright + msedge contra `cpavision.mx`.
+**Estado: 350 RFC descargados; faltan 120 proveedores del objetivo <90 %.** Playwright +
+msedge contra `cpavision.mx`.
 
 - Dataset en `outputs/cpa_vision/parquet`, particionado Hive `rfc=/year=/request_id=`,
-  consultable con DuckDB.
-- Tiempos: ~1.5 h promedio por proveedor, picos de 7–8 h.
+  consultable con DuckDB. **Es la fuente de verdad del avance** (los CSV mienten).
+- Tiempos medidos: mediana 3m 43s, media 9m 32s, p90 17m por proveedor (ver el corte arriba).
 
 ### Problemas abiertos de la Etapa B
 
@@ -215,13 +266,17 @@ dejarlo y que el auditor filtre. No se cambió nada por cuenta propia.
 
 ## Siguiente paso inmediato
 
-- [ ] Terminar Celaya (73692) y revisar su Validación
-- [ ] Correr los 4 urgentes restantes: 76034, 5462, 391250, 80622
+- [ ] Descargar los **120 proveedores / 232 filas prov-año** que faltan del objetivo <90 %
+      (paginar `descarga_monica_pendientes.xlsx` con `--start-index`)
+- [ ] Re-correr `actualizar_plan_beneficio.py` conforme entren descargas, para que el
+      archivo ACTUALIZADO de Mónica refleje el beneficio real
+- [ ] Fase 3: copiar el parquet a la carpeta de Data Services
+      `...\Proceso Validación de condiciones (Oscar Pineda)\cpa_vision`
+- [ ] Confirmar con Mónica el caso **2020 de Selecta** (CFDIs bajados que no cruzan por
+      barcode+factura: 8.5 % → 8.7 %)
+- [ ] Reportar a Mónica los **17 extranjeros sin RFC** (`reporte_monica_extranjeros.xlsx`)
 - [ ] Decidir el umbral de la Validación (arriba)
 - [ ] Resolver **C13** (tasas literales) y **C14** (nivel factura vs. renglón)
-- [ ] Conseguir el archivo **"AP-LI" / pestaña "LI 2025"** (carpeta de Mónica) para
-      priorizar por volumen
-- [ ] Definir los **~50 proveedores prioritarios** y ponerlos a descargar
 
 ## Fuera de alcance por ahora
 

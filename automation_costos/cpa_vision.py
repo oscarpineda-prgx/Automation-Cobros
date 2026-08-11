@@ -12,8 +12,8 @@ from typing import Any
 import pandas as pd
 
 import config
-from automation_cobros.cpa_parquet import zip_to_parquet_dataset
-from automation_cobros.utils import ensure_parent, safe_filename
+from automation_costos.cpa_parquet import zip_to_parquet_dataset
+from automation_costos.utils import ensure_parent, safe_filename
 
 try:
     from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
@@ -364,7 +364,12 @@ def request_vendor_master_batch(
                                 settings=settings,
                                 username=username,
                                 password=password,
+                                rfc=job.rfc,
+                                years=job.years,
                             )
+                            # Si la solicitud se regeneró durante la espera, el ZIP trae el
+                            # request_id nuevo; se usa ese para particionar el Parquet.
+                            request_id = _request_id_from_zip(output_path) or request_id
                             parquet_result = zip_to_parquet_dataset(
                                 output_path,
                                 parquet_root,
@@ -402,7 +407,12 @@ def request_vendor_master_batch(
                             settings=settings,
                             username=username,
                             password=password,
+                            rfc=job.rfc,
+                            years=job.years,
                         )
+                        # Si la solicitud se regeneró durante la espera, el ZIP trae el
+                        # request_id nuevo; se usa ese para particionar el Parquet.
+                        request_id = _request_id_from_zip(output_path) or request_id
                         parquet_result = zip_to_parquet_dataset(
                             output_path,
                             parquet_root,
@@ -477,6 +487,8 @@ def request_vendor_master_batch(
                     ),
                 )
 
+            _resumen_batch(metrics_file)
+            actualizar_metricas_totales(settings.download_dir)
             print(f"Metricas CPA Vision: {metrics_file}", flush=True)
             if keep_open and not settings.headless:
                 input("Presiona Enter para cerrar el navegador...")
@@ -933,6 +945,11 @@ def _configure_default_download_options(
     years = years or range(2020, 2025)
     selected_years = set(years)
 
+    # Margen de la auditoría: las facturas de 2025 subidas tarde se emiten hasta enero 2026.
+    # Por eso, cuando el periodo incluye 2025, además de los años completos se marca SOLO el
+    # mes de enero 2026 (celda del mes, no el año 2026 entero). Reunión con Mónica 2026-08-05.
+    meses_extra = {_MES_MARGEN} if 2025 in selected_years else set()
+
     _log_step("Limpiando filtros EMITIDOS")
     _set_left_filter_options(page, section="EMITIDOS", enabled_options=frozenset())
 
@@ -947,7 +964,9 @@ def _configure_default_download_options(
     _set_period_years(page, section="EMITIDOS", selected_years=set())
 
     _log_step("Seleccionando periodos recibidos")
-    _set_period_years(page, section="RECIBIDOS", selected_years=selected_years)
+    if meses_extra:
+        _log_step(f"Margen: agregando mes {'/'.join(f'{a}-{m:02d}' for a, m in sorted(meses_extra))}")
+    _set_period_years(page, section="RECIBIDOS", selected_years=selected_years, meses=meses_extra)
 
     _log_step("Limpiando RFC en emitidos")
     _clear_rfc_fields(page, section="EMITIDOS")
@@ -971,7 +990,20 @@ def _set_left_filter_options(page, *, section: str, enabled_options: frozenset[s
         )
 
 
-def _set_period_years(page, *, section: str, selected_years: set[int]) -> None:
+# Abreviaturas de los meses en la malla de CPA Vision (columna ENE..DIC).
+_MESES_ABBR = ["ENE", "FEB", "MAR", "ABR", "MAY", "JUN", "JUL", "AGO", "SEP", "OCT", "NOV", "DIC"]
+# Mes de margen: enero 2026 (para facturas de 2025 emitidas/subidas tarde).
+_MES_MARGEN: tuple[int, int] = (2026, 1)
+
+
+def _set_period_years(
+    page, *, section: str, selected_years: set[int], meses: set[tuple[int, int]] = frozenset()
+) -> None:
+    """Marca los AÑOS completos de `selected_years` y, adicional, celdas de MES sueltas.
+
+    `meses` es un conjunto de `(año, mes)` (mes 1-12) que se marcan a nivel celda, sin marcar
+    el año completo. Sirve para el margen (solo enero 2026) sin bajar febrero/marzo.
+    """
     for year in range(2014, 2027):
         _set_checkbox_by_text(
             page,
@@ -982,6 +1014,71 @@ def _set_period_years(page, *, section: str, selected_years: set[int]) -> None:
             exact=True,
             required=False,
         )
+    for year, mes in sorted(meses):
+        _set_month_checkbox(page, section=section, year=year, mes=mes, checked=True)
+
+
+def _set_month_checkbox(page, *, section: str, year: int, mes: int, checked: bool, required: bool = False) -> bool:
+    """Marca/desmarca la casilla de UN mes (celda año×mes) en la malla de periodos.
+
+    Ubica la celda geométricamente: cruza la X del encabezado del mes (ENE..DIC) con la Y de
+    la etiqueta del año, dentro de la sección (RECIBIDOS/EMITIDOS). No hay texto por celda, por
+    eso se hace por posición. Verificar en una corrida real (la malla puede variar de layout)."""
+    abbr = _MESES_ABBR[mes - 1]
+    result = page.evaluate(
+        """
+        ({ section, abbr, year, checked }) => {
+            const norm = (v) => String(v || "").normalize("NFD").replace(/[\\u0300-\\u036f]/g, "")
+                .replace(/\\s+/g, " ").trim().toLowerCase();
+            const isVisible = (el) => { if (!el) return false; const s = getComputedStyle(el);
+                if (s.visibility === "hidden" || s.display === "none") return false;
+                const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0; };
+            const textOf = (el) => norm(el.innerText || el.textContent || "");
+            const wantScope = norm(section), wantAbbr = norm(abbr), wantYear = String(year);
+
+            const texts = Array.from(document.body.querySelectorAll("*")).filter(isVisible)
+                .map((el) => ({ el, rect: el.getBoundingClientRect(), t: textOf(el) }))
+                .filter((it) => it.t && it.t.length <= 60);
+
+            const scopes = texts.filter((it) => it.t.includes(wantScope));
+            if (!scopes.length) return { ok: false, message: "No se encontro la seccion " + section };
+            const scopeOK = (rect) => scopes.some((s) =>
+                s.rect.top <= rect.top + 5 && Math.abs(s.rect.left - rect.left) < 700 && (rect.top - s.rect.top) < 500);
+
+            const monthHdr = texts.filter((it) => it.t === wantAbbr && scopeOK(it.rect))
+                .sort((a, b) => a.rect.top - b.rect.top)[0];
+            const yearLbl = texts.filter((it) => it.t === wantYear && scopeOK(it.rect))
+                .sort((a, b) => a.rect.left - b.rect.left)[0];
+            if (!monthHdr || !yearLbl) return { ok: false, message: "No se ubico " + abbr + "/" + year + " en " + section };
+
+            const targetX = monthHdr.rect.left + monthHdr.rect.width / 2;
+            const targetY = yearLbl.rect.top + yearLbl.rect.height / 2;
+
+            const boxes = Array.from(document.querySelectorAll("input[type='checkbox']"))
+                .filter((i) => !i.disabled && isVisible(i) && scopeOK(i.getBoundingClientRect()));
+            let best = null;
+            for (const b of boxes) {
+                const r = b.getBoundingClientRect();
+                const dx = Math.abs(r.left + r.width / 2 - targetX);
+                const dy = Math.abs(r.top + r.height / 2 - targetY);
+                if (dx > 22 || dy > 14) continue;  // debe caer en la celda mes x año
+                const d = dx + dy;
+                if (!best || d < best.d) best = { el: b, d };
+            }
+            if (!best) return { ok: false, message: "No se encontro casilla " + abbr + " " + year + " en " + section };
+            best.el.scrollIntoView({ block: "center", inline: "center" });
+            if (best.el.checked !== checked) { best.el.click();
+                return { ok: true, changed: true, message: "Mes " + abbr + " " + year + " (" + section + ") -> " + checked }; }
+            return { ok: true, changed: false, message: "Mes " + abbr + " " + year + " ya estaba en " + checked };
+        }
+        """,
+        {"section": section, "abbr": abbr, "year": year, "checked": checked},
+    )
+    if not result.get("ok") and required:
+        raise RuntimeError(result.get("message") or f"No se encontro el mes {abbr} {year}")
+    _log_step(result.get("message", f"mes {abbr} {year}"))
+    page.wait_for_timeout(150)
+    return bool(result.get("ok"))
 
 
 def _select_only_download_file_options(page, option_texts: tuple[str, ...]) -> None:
@@ -1370,6 +1467,61 @@ def _extract_request_id(page) -> str:
     return match.group(1)
 
 
+def _reauth_solicitudes(page, settings: CPAVisionSettings, username: str, password: str) -> None:
+    """Cierra la sesión lógica (navega a login), vuelve a iniciar sesión y reabre solicitudes.
+
+    Se usa tanto para recuperación reactiva (redirección/logout) como para el refresco
+    preventivo cada N intentos. No cierra el navegador para no invalidar el `page` que el
+    llamador sigue usando después de descargar; el efecto es una sesión fresca sobre la
+    misma página.
+
+    Reproduce el mismo orden que el arranque de sesión: login → seleccionar empresa SORIANA
+    y entrar a "Descargas" (`_open_descargas`) → abrir "Solicitudes". Saltarse
+    `_open_descargas` dejaba la sesión atascada en la pantalla "SELECCIONAR EMPRESA", donde
+    el botón "Solicitudes" no existe y la tabla nunca cargaba.
+    """
+    page.goto(settings.base_url, wait_until="domcontentloaded")
+    _dismiss_transient_overlays(page)
+    if not _is_empresa_or_downloads_page(page):
+        _login(page, username, password, settings.timeout_ms)
+    _open_descargas(page, settings.timeout_ms)
+    _open_solicitudes(page)
+
+
+def _en_area_descargas(page) -> bool:
+    """True si la URL está dentro de Descarga masiva (descargas o solicitudes).
+
+    A diferencia de `_is_empresa_or_downloads_page`, la pantalla "SELECCIONAR EMPRESA"
+    (okta/empresas) NO cuenta como "dentro": desde ahí no se ve la tabla de solicitudes y
+    hay que volver a entrar a la empresa.
+    """
+    try:
+        return bool(re.search(r"descarga-masiva", page.url, re.IGNORECASE))
+    except Exception:
+        return False
+
+
+def _regenerar_solicitud(page, settings: CPAVisionSettings, rfc: str, years) -> str:
+    """Crea una solicitud nueva para el mismo RFC cuando la anterior nunca apareció.
+
+    Vuelve al formulario de Descarga masiva, reconfigura RFC/años y solicita de nuevo.
+    Devuelve el nuevo request_id. La deduplicación por `request_id` del dataset Parquet
+    (ver `cruce_cpa.request_id_principal`) se encarga de que, si por algún motivo llegaran
+    a existir dos descargas del mismo RFC, solo se use la más completa.
+    """
+    _return_to_downloads_form(page, settings.timeout_ms)
+    _configure_default_download_options(page, rfc=rfc, years=years)
+    return _submit_download_request(page, settings.timeout_ms)
+
+
+def _request_id_from_zip(path) -> str:
+    """request_id a partir del nombre del ZIP descargado (p. ej. `645989_1873_...zip`)."""
+    try:
+        return Path(path).name.split("_", 1)[0].strip()
+    except Exception:
+        return ""
+
+
 def _wait_for_request_zip(
     page,
     request_id: str,
@@ -1380,21 +1532,48 @@ def _wait_for_request_zip(
     settings: CPAVisionSettings | None = None,
     username: str | None = None,
     password: str | None = None,
+    reauth_every_attempts: int = 60,
+    rfc: str | None = None,
+    years: Any = None,
+    regenerate_after_missing: int = 30,
 ) -> Path:
     _open_solicitudes(page)
     deadline = time.monotonic() + max_wait_minutes * 60
+    puede_reautenticar = bool(username and password and settings)
+    # Solo se puede regenerar si sabemos el RFC y los años (los trae el lote, no el flujo
+    # de "esperar una solicitud existente").
+    puede_regenerar = bool(rfc and years is not None and settings and regenerate_after_missing > 0)
+    missing_streak = 0
     attempt = 1
     while True:
-        # Validación proactiva de sesión activa.
-        # Si la URL ya no pertenece al área de descarga masiva (fue redirigido a login/okta),
-        # intentamos recuperar la sesión antes de continuar.
-        if not _is_empresa_or_downloads_page(page) and username and password and settings:
-            _log_step("Sesion cerrada o redirigida durante la espera. Re-autenticando...")
+        # Refresco preventivo: aunque todo vaya bien, cada `reauth_every_attempts` intentos
+        # reiniciamos la sesión (login de nuevo) y volvemos a solicitudes. Evita sesiones
+        # de horas que el portal pueda invalidar silenciosamente sin redirigir.
+        if (
+            puede_reautenticar
+            and reauth_every_attempts > 0
+            and attempt > 1
+            and (attempt - 1) % reauth_every_attempts == 0
+        ):
+            _log_step(
+                f"Intento {attempt}: refresco preventivo de sesion "
+                f"(cada {reauth_every_attempts} intentos). Reiniciando sesion..."
+            )
             try:
-                page.goto(settings.base_url, wait_until="domcontentloaded")
-                _dismiss_transient_overlays(page)
-                _login(page, username, password, settings.timeout_ms)
-                _open_solicitudes(page)
+                _reauth_solicitudes(page, settings, username, password)
+            except Exception as e:
+                _log_step(f"Fallo el refresco preventivo de sesion: {e}")
+                # No lanzamos error: el reload() normal más abajo hará otro intento.
+
+        # Validación proactiva de sesión activa.
+        # Si ya NO estamos dentro de Descarga masiva (nos regresó a "SELECCIONAR EMPRESA" o
+        # a login/okta), hay que re-entrar: _reauth_solicitudes reinicia sesión, selecciona
+        # la empresa y abre Solicitudes. Antes se usaba _is_empresa_or_downloads_page, que
+        # tomaba la pantalla de empresas como válida y dejaba el flujo atascado ahí.
+        if puede_reautenticar and not _en_area_descargas(page):
+            _log_step("Fuera del área de descargas (empresas/logout) durante la espera. Recuperando sesion...")
+            try:
+                _reauth_solicitudes(page, settings, username, password)
             except Exception as e:
                 _log_step(f"Fallo el intento de recuperacion de sesion: {e}")
                 # No lanzamos error aquí para permitir que el flujo normal intente el reload()
@@ -1405,14 +1584,37 @@ def _wait_for_request_zip(
         _dismiss_transient_overlays(page)
         row = _find_request_row(page, request_id, timeout_ms=30_000)
         if row is None:
+            missing_streak += 1
             if time.monotonic() >= deadline:
                 raise TimeoutError(
                     f"No se encontro la solicitud {request_id} en {max_wait_minutes} minutos."
                 )
-            _log_step(f"La solicitud {request_id} aun no aparece en la tabla. Esperando {poll_seconds} segundos")
+            # La solicitud nunca apareció en la tabla tras muchos intentos: lo más probable
+            # es que el envío se haya perdido del lado del portal. Se regenera una solicitud
+            # nueva para el mismo RFC y se sigue esperando con ese nuevo id (idea de Óscar).
+            if puede_regenerar and missing_streak >= regenerate_after_missing:
+                _log_step(
+                    f"La solicitud {request_id} no aparece tras {missing_streak} intentos. "
+                    f"Regenerando solicitud para {rfc}..."
+                )
+                try:
+                    request_id = _regenerar_solicitud(page, settings, rfc, years)
+                    _log_step(f"Nueva solicitud creada: {request_id}. Reiniciando espera.")
+                    missing_streak = 0
+                    _open_solicitudes(page)
+                except Exception as regen_exc:
+                    _log_step(f"No se pudo regenerar la solicitud: {regen_exc}")
+            else:
+                _log_step(
+                    f"La solicitud {request_id} aun no aparece en la tabla "
+                    f"({missing_streak} intento(s)). Esperando {poll_seconds} segundos"
+                )
             page.wait_for_timeout(poll_seconds * 1_000)
             attempt += 1
             continue
+
+        # La solicitud apareció: reiniciamos el contador de "no aparece".
+        missing_streak = 0
 
         ready_link = _first_ready_request_link(row)
         if ready_link is not None:
@@ -1491,6 +1693,39 @@ def _validate_years(years: Any, source: str) -> tuple[int, ...]:
     if unsupported:
         raise ValueError(f"FECHAS contiene anos fuera de CPA Vision ({source}): {unsupported}")
     return unique_years
+
+
+def _resumen_batch(metrics_path: Path) -> None:
+    """Imprime un resumen de tiempos al final del lote (lee el CSV de metricas)."""
+    import csv as _csv
+    if not metrics_path.exists():
+        return
+    with metrics_path.open(encoding="utf-8-sig") as _h:
+        filas = list(_csv.DictReader(_h))
+    if not filas:
+        return
+    def _num(x):
+        try:
+            return float(x)
+        except (TypeError, ValueError):
+            return 0.0
+    ok = [r for r in filas if r.get("status") == "downloaded"]
+    err = [r for r in filas if r.get("status") != "downloaded"]
+    total_seg = sum(_num(r.get("elapsed_seconds")) for r in filas)
+    total_filas = sum(int(_num(r.get("parquet_rows"))) for r in filas)
+    prom = total_seg / len(filas) if filas else 0.0
+    def _fmt(seg):
+        seg = int(seg); h, resto = divmod(seg, 3600); m, s = divmod(resto, 60)
+        return f"{h}h {m}m {s}s"
+    print("", flush=True)
+    print("==================== RESUMEN DE LA EJECUCION ====================", flush=True)
+    print(f"  Proveedores procesados : {len(filas)}  (OK: {len(ok)}  |  con error: {len(err)})", flush=True)
+    print(f"  Tiempo total           : {_fmt(total_seg)}  ({total_seg:,.0f} s)", flush=True)
+    print(f"  Promedio por proveedor : {_fmt(prom)}", flush=True)
+    print(f"  Filas descargadas      : {total_filas:,}", flush=True)
+    if err:
+        print(f"  Con error (revisar)    : {', '.join(r.get('rfc','?') for r in err)}", flush=True)
+    print("================================================================", flush=True)
 
 
 def _default_batch_metrics_path(download_dir: Path) -> Path:
@@ -2004,3 +2239,67 @@ def _require_playwright() -> None:
             "Playwright no esta instalado. Ejecuta: python -m pip install -r requirements.txt "
             "y luego: python -m playwright install chromium"
         )
+
+
+def actualizar_metricas_totales(download_dir: Path) -> Path:
+    """Consolida TODOS los cpa_batch_metrics_*.csv y actualiza METRICAS_TOTALES.txt/.csv.
+
+    Se llama solo al terminar cada lote: junta lo nuevo con lo previo y reescribe la metrica
+    acumulada (proveedores unicos OK, tiempo total, promedio por proveedor, filas).
+    """
+    import csv as _csv
+    import glob as _glob
+
+    download_dir = Path(download_dir)
+    archivos = sorted(_glob.glob(str(download_dir / "cpa_batch_metrics_*.csv")))
+    filas = []
+    for a in archivos:
+        with open(a, encoding="utf-8-sig") as h:
+            filas.extend(_csv.DictReader(h))
+
+    def _num(x):
+        try:
+            return float(x)
+        except (TypeError, ValueError):
+            return 0.0
+
+    def _fmt(seg):
+        seg = int(seg)
+        h, resto = divmod(seg, 3600)
+        m, s = divmod(resto, 60)
+        return f"{h}h {m}m {s}s"
+
+    ok = [r for r in filas if r.get("status") == "downloaded"]
+    err = [r for r in filas if r.get("status") != "downloaded"]
+    unicos = {r.get("rfc"): r for r in ok}
+    total_seg = sum(_num(r.get("elapsed_seconds")) for r in filas)
+    seg_u = sum(_num(r.get("elapsed_seconds")) for r in unicos.values())
+    total_filas = sum(int(_num(r.get("parquet_rows"))) for r in unicos.values())
+    prom = seg_u / len(unicos) if unicos else 0.0
+
+    cols = ["rfc", "fechas", "years", "request_id", "status", "parquet_rows",
+            "elapsed_seconds", "finished_at"]
+    csv_out = download_dir / "METRICAS_TOTALES.csv"
+    with csv_out.open("w", newline="", encoding="utf-8-sig") as h:
+        w = _csv.DictWriter(h, fieldnames=cols)
+        w.writeheader()
+        for r in unicos.values():
+            w.writerow({c: r.get(c, "") for c in cols})
+
+    lineas = [
+        "METRICA TOTAL DE DESCARGAS (CPA Vision)",
+        f"Actualizado          : {datetime.now():%Y-%m-%d %H:%M:%S}",
+        f"Archivos de metricas : {len(archivos)}",
+        f"Intentos totales     : {len(filas)}  (OK: {len(ok)} | error: {len(err)})",
+        f"Proveedores unicos OK: {len(unicos)}",
+        f"Tiempo total (todo)  : {_fmt(total_seg)}  ({total_seg:,.0f} s)",
+        f"Promedio x proveedor : {_fmt(prom)}",
+        f"Filas descargadas    : {total_filas:,}",
+    ]
+    txt_out = download_dir / "METRICAS_TOTALES.txt"
+    txt_out.write_text(chr(10).join(lineas) + chr(10), encoding="utf-8")
+    print("", flush=True)
+    for l in lineas:
+        print("  " + l, flush=True)
+    print(f"  Metricas acumuladas  -> {txt_out}", flush=True)
+    return txt_out

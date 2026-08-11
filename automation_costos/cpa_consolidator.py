@@ -9,7 +9,7 @@ import pandas as pd
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 
-from automation_cobros.utils import ensure_parent
+from automation_costos.utils import ensure_parent
 
 
 EXCEL_MAX_ROWS = 1_048_576
