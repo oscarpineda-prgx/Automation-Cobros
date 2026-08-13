@@ -1,10 +1,26 @@
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
 
 
-BASE_DIR = Path(__file__).resolve().parent
+# Hay DOS raices distintas y confundirlas rompe el .exe:
+#
+# - RESOURCE_DIR: los archivos que van EMPAQUETADOS (plantillas, logos). Con PyInstaller
+#   viven en la carpeta temporal que el bootloader extrae (`sys._MEIPASS`), no junto al .exe.
+# - BASE_DIR: los datos del USUARIO (salidas, logs, sesion de CPA Vision). Tienen que quedar
+#   junto al .exe, porque `sys._MEIPASS` se BORRA al cerrar el programa: escribir ahi
+#   equivale a perder el trabajo.
+#
+# En desarrollo (sin congelar) las dos apuntan a la raiz del proyecto y todo sigue igual.
+_CONGELADO = getattr(sys, "frozen", False)
+
+RESOURCE_DIR = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
+BASE_DIR = (
+    Path(sys.executable).resolve().parent if _CONGELADO else Path(__file__).resolve().parent
+)
+
 OUTPUT_DIR = BASE_DIR / "outputs"
 LOG_DIR = BASE_DIR / "logs"
 
@@ -30,8 +46,30 @@ VALIDATION_DIFFERENCE_THRESHOLD = float(
 
 # CPA Vision / Playwright automation.
 CPA_VISION_URL = os.getenv("CPA_VISION_URL", "https://cpavision.mx/")
-CPA_VISION_DOWNLOAD_DIR = Path(
-    os.getenv("CPA_VISION_DOWNLOAD_DIR", str(OUTPUT_DIR / "cpa_vision"))
+
+# Raiz del acervo de CPA Vision. UNA sola fuente de verdad para todo el proyecto: la GUI,
+# el .exe, el scraper y los scripts de cobertura. Si cada uno apuntara a su propia carpeta
+# el dataset quedaria partido y `gen_lote_monica.py` reportaria como pendientes proveedores
+# que en realidad ya se bajaron.
+#
+# Por convencion los ZIP quedan en la raiz y el Parquet en <raiz>/parquet
+# (ver `cpa_descarga.descargar_cpa_proveedor`). Vive fuera del repositorio, junto a los
+# entregables, porque son ~5 GB de datos del cliente que no pertenecen al codigo.
+# Se puede mover con la variable de entorno CPA_VISION_DIR sin tocar el codigo.
+CPA_VISION_DIR = Path(
+    os.getenv(
+        "CPA_VISION_DIR",
+        r"X:\Soriana\00 - AUDITORIA 2020 - 2024\Proceso Validación de condiciones (Oscar Pineda)\cpa_vision",
+    )
+)
+CPA_VISION_DOWNLOAD_DIR = Path(os.getenv("CPA_VISION_DOWNLOAD_DIR", str(CPA_VISION_DIR)))
+# Carpeta hermana con SOLO los proveedor-año de cobertura EDI < 90% (lo que se entrega como
+# complemento). `CPA_VISION_DIR` conserva TODO lo descargado, sin filtro.
+CPA_VISION_COMPLEMENTO_DIR = Path(
+    os.getenv("CPA_VISION_COMPLEMENTO_DIR", str(CPA_VISION_DIR.parent / "cpa_vision_complemento"))
+)
+CPA_VISION_PARQUET_DIR = Path(
+    os.getenv("CPA_VISION_PARQUET_DIR", str(CPA_VISION_DIR / "parquet"))
 )
 CPA_VISION_STATE_PATH = Path(
     os.getenv("CPA_VISION_STATE_PATH", str(LOG_DIR / "cpavision_state.json"))
@@ -60,5 +98,20 @@ def get_connection_string() -> str:
     return ";".join(parts) + ";"
 
 
-OUTPUT_DIR.mkdir(exist_ok=True)
-LOG_DIR.mkdir(exist_ok=True)
+def _crear_carpeta(ruta: Path) -> None:
+    """Crea la carpeta sin tumbar el arranque si no se puede.
+
+    Importar `config` no debe poder matar el programa. Si el .exe se copia a una carpeta
+    de solo lectura, a una unidad de red caida o a un USB que se quito, un `mkdir` que
+    lanza aqui deja la GUI muerta ANTES de poder mostrar un mensaje —y compilada con
+    `console=False` el usuario no ve absolutamente nada—. Se falla despues, al escribir,
+    donde si hay como avisarle.
+    """
+    try:
+        ruta.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass
+
+
+_crear_carpeta(OUTPUT_DIR)
+_crear_carpeta(LOG_DIR)

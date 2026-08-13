@@ -40,7 +40,7 @@ import config
 
 PLAN = RAIZ / "Planeacion vs %EDI poblado Soriana.xlsx"
 PRIORIDAD = RAIZ / "Prioridad_Proveedores_CPA.xlsx"
-PARQUET = RAIZ / "outputs" / "cpa_vision" / "parquet"
+PARQUET = config.CPA_VISION_PARQUET_DIR
 SALIDA = RAIZ / "descarga_monica_pendientes.xlsx"
 EXTRANJEROS = RAIZ / "reporte_monica_extranjeros.xlsx"
 

@@ -27,6 +27,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
+import pandas as pd
+
 from automation_costos.calculations import prepare_compras_dataframe
 from automation_costos.cruce_cpa import (
     ResultadoCruce,
@@ -38,12 +40,24 @@ from automation_costos.cruce_cpa import (
 )
 from automation_costos.database import contar_compras, fetch_compras
 from automation_costos.excel_exporter import write_compras_files
-from automation_costos.utils import clean_code, safe_filename
+from automation_costos.utils import clean_code, safe_filename, to_number
 from automation_costos.validation_exporter import write_validation_from_dataframe
 
 # Subcarpeta, dentro de la del proveedor, donde se dejan los ZIP de CPA Vision que
 # respaldan la salida. Con espacios, tal como se acordó nombrarla.
 SUBCARPETA_SOPORTES = "cpa vision soportes"
+
+# Cobertura EDI minima del propio Compras para aceptar seguir SIN datos de CPA Vision.
+# Es el mismo 90% con el que la planeacion decide si un proveedor-año hay que descargarlo:
+# por encima de eso la factura electronica ya viene poblada de origen y el cruce no aporta.
+_MINIMO_EDI_SIN_CPA = 0.90
+
+
+def _cobertura_edi(df) -> float:
+    """Proporcion de renglones que ya traen costo del CFDI (`ctonto_edi`) en el Compras."""
+    if "ctonto_edi" not in df.columns or df.empty:
+        return 0.0
+    return float((to_number(df["ctonto_edi"]) != 0).mean())
 
 # Arriba de estos renglones el proveedor NO cabe en memoria de una sola vez y se procesa
 # año por año (pipeline_streaming). Debajo se usa el camino normal (todo en memoria), que es
@@ -70,6 +84,8 @@ def generar_salida_proveedor(
     output_dir: Path | str,
     *,
     log: Callable[[str], None] = print,
+    usar_cpa: bool = True,
+    anios_cruce: set[int] | None = None,
 ) -> ResultadoPipeline:
     """Genera la salida de un proveedor eligiendo el camino según su tamaño.
 
@@ -88,13 +104,46 @@ def generar_salida_proveedor(
         log(f"      Proveedor grande (> {MAX_FILAS_EN_MEMORIA:,}): se procesa por trimestres.")
         from automation_costos.pipeline_streaming import generar_salida_proveedor_por_anios
 
-        return generar_salida_proveedor_por_anios(
-            vendor, start_date, end_date, parquet_root, output_dir, log=log
+        resultado = generar_salida_proveedor_por_anios(
+            vendor, start_date, end_date, parquet_root, output_dir, log=log, usar_cpa=usar_cpa
         )
+    else:
+        resultado = _generar_salida_en_memoria(
+            vendor, start_date, end_date, parquet_root, output_dir, log=log,
+            usar_cpa=usar_cpa, anios_cruce=anios_cruce,
+        )
+    actualizar_reporte_consolidado(output_dir, log=log)
+    return resultado
 
-    return _generar_salida_en_memoria(
-        vendor, start_date, end_date, parquet_root, output_dir, log=log
-    )
+
+def actualizar_reporte_consolidado(output_dir: Path | str, *, log: Callable[[str], None] = print) -> None:
+    """Refresca el reporte de control de diferencias de toda la carpeta de entregables.
+
+    Se cuelga del final de cada proveedor para que el archivo que revisa Héctor esté al día
+    sin que nadie tenga que acordarse de regenerarlo. **Nunca** puede tumbar la corrida: el
+    entregable del proveedor ya está escrito y es lo que importa, así que cualquier fallo
+    aquí se reporta y se sigue.
+    """
+    try:
+        from automation_costos.reporte_diferencias import actualizar_reporte
+
+        destino = actualizar_reporte(output_dir, log=lambda m: None)
+        log(f"[+] Reporte de diferencias actualizado: {destino.name}")
+    except Exception as exc:  # noqa: BLE001 — el reporte es accesorio, el entregable no
+        log(f"[+] No se pudo actualizar el reporte de diferencias: {exc}")
+
+
+def _mascara_anios(raw, anios: set[int] | None):
+    """Renglones cuyo año de recibo está en `anios`, o None si aplica a todos.
+
+    Devolver None cuando no hay recorte evita partir y reconcatenar el DataFrame en el caso
+    normal, que es el de todos los proveedores menos un par.
+    """
+    if not anios:
+        return None
+    fechas = pd.to_datetime(raw.get("rcvdt"), errors="coerce")
+    mascara = fechas.dt.year.isin(anios)
+    return None if bool(mascara.all()) else mascara
 
 
 def _generar_salida_en_memoria(
@@ -105,6 +154,8 @@ def _generar_salida_en_memoria(
     output_dir: Path | str,
     *,
     log: Callable[[str], None] = print,
+    usar_cpa: bool = True,
+    anios_cruce: set[int] | None = None,
 ) -> ResultadoPipeline:
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -116,14 +167,58 @@ def _generar_salida_en_memoria(
     rfc = rfc_de_compras(raw)
     log(f"      {len(raw):,} renglones · RFC {rfc}")
 
-    log("[2/4] Rellenando columnas EDI desde CPA Vision...")
-    barcodes = set(raw["codbarra"].map(solo_digitos)) - {""}
-    cpa = cargar_cpa(rfc, parquet_root, barcodes=barcodes)
-    if cpa.empty:
-        raise ValueError(f"El RFC {rfc} no tiene datos en el dataset Parquet.")
-    cruce = cruzar(raw, cpa)
-    for linea in cruce.resumen().splitlines():
-        log("      " + linea)
+    cruce = None
+    cpa = None
+    if not usar_cpa:
+        # Decision explicita de quien llama: la columna `accion` del plan dice solo
+        # "Ejecutar", asi que el entregable sale con el EDI que ya trae el Compras. No se
+        # mira el Parquet aunque tenga datos de ese RFC: que el resultado dependa de que
+        # se alcanzo a descargar haria la corrida irreproducible.
+        log("[2/4] Sin cruce con CPA Vision (ejecucion sin CPA, por indicacion del plan).")
+    else:
+        log("[2/4] Rellenando columnas EDI desde CPA Vision...")
+        barcodes = set(raw["codbarra"].map(solo_digitos)) - {""}
+        cpa = cargar_cpa(rfc, parquet_root, barcodes=barcodes)
+    if usar_cpa and cpa.empty:
+        # Sin CPA se sigue adelante, pero solo si el propio Compras ya trae la factura
+        # electronica: hay proveedores que la planeacion marca "Ejecutar" y no "Descargar"
+        # justamente porque su cobertura EDI ya viene alta de origen (p. ej. Laboratorios
+        # Serral, 98.9%) y no hay nada que descargar de CPA. Abortar ahi impedia generar
+        # un entregable perfectamente valido.
+        #
+        # Si en cambio el Compras viene VACIO de EDI, la falta de CPA si es un problema
+        # real —parquet equivocado, RFC mal resuelto o descarga pendiente— y ahi si se
+        # aborta, porque la Validacion saldria sin sustento.
+        cobertura = _cobertura_edi(raw)
+        if cobertura < _MINIMO_EDI_SIN_CPA:
+            raise ValueError(
+                f"El RFC {rfc} no tiene datos en el dataset Parquet y el Compras solo trae "
+                f"{cobertura:.1%} de cobertura EDI. Falta descargarlo de CPA Vision."
+            )
+        log(
+            f"      SIN datos de CPA para {rfc}; se continua porque el Compras ya trae "
+            f"{cobertura:.1%} de cobertura EDI (no habia nada que cruzar)."
+        )
+    elif usar_cpa:
+        # `anios_cruce` acota el cruce a ciertos años. Hace falta porque hay proveedores
+        # cuya columna `accion` pide "Descargar/Ejecutar" en un año y solo "Ejecutar" en
+        # los otros: cruzar el periodo completo metería CPA en años que el plan excluye.
+        # El año de un renglón es el de su fecha de recibo, que es por donde F_COMPRAS
+        # filtra el periodo.
+        objetivo = _mascara_anios(raw, anios_cruce)
+        if objetivo is None:
+            cruce = cruzar(raw, cpa)
+        else:
+            log(f"      Cruce acotado a los años {sorted(anios_cruce)}: "
+                f"{int(objetivo.sum()):,} de {len(raw):,} renglones.")
+            parte = raw.loc[objetivo].copy()
+            resto = raw.loc[~objetivo]
+            cruce = cruzar(parte, cpa, en_sitio=True)
+            # sort_index restituye el orden original: las dos mitades vuelven a intercalarse
+            # como venían de SQL, no una detrás de la otra.
+            cruce.df = pd.concat([cruce.df, resto]).sort_index()
+        for linea in cruce.resumen().splitlines():
+            log("      " + linea)
 
     # Cada proveedor tiene su propia carpeta "<numero>_<nombre>"; adentro van el Compras,
     # la Validación y la subcarpeta de soportes de CPA Vision. Así queda un paquete
@@ -133,6 +228,10 @@ def _generar_salida_en_memoria(
     proveedor_dir.mkdir(parents=True, exist_ok=True)
     validacion_path = proveedor_dir / f"Validacion_{base}.xlsx"
 
+    # Si hubo cruce se sigue con su DataFrame; si no lo hubo (proveedor sin CPA y con el EDI
+    # ya poblado), se sigue con el Compras tal como vino de SQL.
+    trabajo = cruce.df if cruce is not None else raw
+
     # Soltamos las tablas de origen (grandes y tipo object) antes de la parte pesada:
     # el cruce ya produjo su propio DataFrame y no volvemos a usar raw ni cpa.
     del raw, cpa
@@ -140,8 +239,10 @@ def _generar_salida_en_memoria(
     # Preparamos UNA sola vez y reusamos para Validación y Compras (antes se preparaba
     # dos veces, duplicando el pico de memoria en proveedores grandes). `en_sitio` deja
     # que la preparación reescriba el DataFrame del cruce en vez de copiarlo.
-    prepared = prepare_compras_dataframe(cruce.df, en_sitio=True)
-    cruce.df = prepared
+    prepared = prepare_compras_dataframe(trabajo, en_sitio=True)
+    if cruce is not None:
+        cruce.df = prepared
+    del trabajo
 
     # La Validación va PRIMERO: es el entregable real y es chica. Así sale aunque el
     # Compras gigante falle, y trabaja sobre el DataFrame antes de que el exportador le
@@ -163,7 +264,11 @@ def _generar_salida_en_memoria(
     # Los ZIP de CPA Vision quedan junto a la salida como soporte. Es un paso opcional:
     # si algo falla (falta el ZIP, permisos, disco), se avisa pero NO se tumba la salida,
     # que ya está escrita.
-    soportes = copiar_soportes_cpa(rfc, parquet_root, proveedor_dir, log=log)
+    # Sin cruce no se copian soportes: el entregable no se apoya en ningun CFDI, y meter
+    # los ZIP sugeriria lo contrario a quien lo revise.
+    soportes = (
+        copiar_soportes_cpa(rfc, parquet_root, proveedor_dir, log=log) if usar_cpa else []
+    )
 
     return ResultadoPipeline(
         rfc=rfc,

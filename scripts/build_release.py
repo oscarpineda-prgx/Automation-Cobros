@@ -20,7 +20,9 @@ from pathlib import Path
 RAIZ = Path(__file__).resolve().parent.parent
 SPEC = RAIZ / "AutomationCostos.spec"
 DIST = RAIZ / "dist"
-EXE = DIST / "AutomationCostos.exe"
+# Modo onedir: PyInstaller deja una CARPETA con el .exe y sus librerias al lado.
+APP_DIR = DIST / "AutomationCostos"
+EXE = APP_DIR / "AutomationCostos.exe"
 VERSION = "1.0"
 
 # Archivos que acompañan al ejecutable dentro del zip.
@@ -44,12 +46,16 @@ def empaquetar() -> Path:
     destino = DIST / nombre
     print(f"Empaquetando {destino.name}...")
 
+    # En onedir hay que meter la CARPETA completa: el .exe solo no arranca sin `_internal`.
+    # Todo cuelga de "AutomationCostos/" para que al descomprimir quede una sola carpeta.
     with zipfile.ZipFile(destino, "w", zipfile.ZIP_DEFLATED) as zf:
-        zf.write(EXE, EXE.name)
+        for ruta in sorted(APP_DIR.rglob("*")):
+            if ruta.is_file():
+                zf.write(ruta, Path(APP_DIR.name) / ruta.relative_to(APP_DIR))
         for extra in EXTRAS:
             ruta = RAIZ / extra
             if ruta.exists():
-                zf.write(ruta, ruta.name)
+                zf.write(ruta, Path(APP_DIR.name) / ruta.name)
 
     tamano = destino.stat().st_size / 1_048_576
     print(f"Listo: {destino}  ({tamano:.1f} MB)")

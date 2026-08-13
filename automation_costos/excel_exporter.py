@@ -329,7 +329,7 @@ def _clean(value):
 
 
 def _add_logo(ws) -> None:
-    logo_path = config.BASE_DIR / "templates" / "Soriana-Logo.png"
+    logo_path = config.RESOURCE_DIR / "templates" / "Soriana-Logo.png"
     if logo_path.exists():
         ws.insert_image(1, 0, str(logo_path), {"x_scale": 0.5, "y_scale": 0.5})
 

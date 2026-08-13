@@ -32,7 +32,7 @@ THIN_BORDER = Border(
 
 def _add_logo(ws) -> None:
     """Inserta el logo de Soriana en A2, igual que en el Compras."""
-    logo_path = config.BASE_DIR / "templates" / "Soriana-Logo.png"
+    logo_path = config.RESOURCE_DIR / "templates" / "Soriana-Logo.png"
     if not logo_path.exists():
         return
     logo = XLImage(str(logo_path))
@@ -578,7 +578,7 @@ def _formatos_xlsx(wb) -> dict:
 def _titulo_xlsx(ws, vendor_label: str, fmts: dict) -> None:
     """Logo + título (filas 2-4), igual que `_write_sheet_title` de la ruta openpyxl."""
     ws.hide_gridlines(2)
-    logo = config.BASE_DIR / "templates" / "Soriana-Logo.png"
+    logo = config.RESOURCE_DIR / "templates" / "Soriana-Logo.png"
     if logo.exists():
         ws.insert_image(1, 0, str(logo), {"x_scale": 0.9, "y_scale": 0.9})
     for fila, texto in ((1, "Tiendas Soriana, S.A. de C.V."), (2, vendor_label), (3, "Validacion de Condiciones")):

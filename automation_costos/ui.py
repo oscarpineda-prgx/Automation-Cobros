@@ -116,8 +116,14 @@ class Indicadores:
             self.estado(clave, "idle")
 
     def estado(self, clave: str, estado: str) -> None:
-        """Actualiza punto y barra. Seguro de llamar desde otro hilo."""
-        self.root.after(0, lambda: self._aplicar(clave, estado))
+        """Actualiza punto y barra. **Debe llamarse desde el hilo de la interfaz.**
+
+        Antes hacia `root.after(0, ...)` por su cuenta para poder invocarse desde un hilo
+        de fondo, pero `after` es a su vez una llamada a Tk: no resolvia el problema, solo
+        lo escondia mientras el mainloop estuviera vivo. Quien orqueste los hilos es el que
+        debe encolar (ver `CostosApp._en_ui`); aqui solo vive la presentacion.
+        """
+        self._aplicar(clave, estado)
 
     def _aplicar(self, clave: str, estado: str) -> None:
         color = {
@@ -315,6 +321,20 @@ def pista(parent: ctk.CTkFrame, tema: Tema, texto: str) -> None:
         font=ctk.CTkFont(FUENTE, 10),
         text_color=tema("t2"),
     ).pack(anchor="w", padx=14, pady=(2, 1))
+
+
+def aviso(parent: ctk.CTkFrame, tema: Tema, texto: str = "") -> ctk.CTkLabel:
+    """Linea informativa bajo un boton. A diferencia de `pista`, se actualiza en vivo."""
+    etiqueta = ctk.CTkLabel(
+        parent,
+        text=texto,
+        font=ctk.CTkFont(FUENTE, 10),
+        text_color=tema("t2"),
+        anchor="w",
+        justify="left",
+    )
+    etiqueta.pack(anchor="w", fill="x", padx=14, pady=(1, 2))
+    return etiqueta
 
 
 def campo(

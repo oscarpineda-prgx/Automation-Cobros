@@ -398,7 +398,7 @@ def _escribir_excel(consolidado: pd.DataFrame, detalle: pd.DataFrame, output_pat
 def _encabezado_hoja(wb, ws, fmt, subtitulo: str, ncols: int) -> None:
     """Logo + título corporativo en las primeras filas, igual que la Validación."""
     ws.hide_gridlines(2)
-    logo = config.BASE_DIR / "templates" / "Soriana-Logo.png"
+    logo = config.RESOURCE_DIR / "templates" / "Soriana-Logo.png"
     if logo.exists():
         try:
             from PIL import Image as PILImage

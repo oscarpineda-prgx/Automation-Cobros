@@ -28,19 +28,24 @@ a = Analysis(
 )
 pyz = PYZ(a.pure)
 
+# Empaquetado en modo ONEDIR (EXE + COLLECT), no onefile.
+#
+# En onefile el .exe es un contenedor comprimido de ~123 MB que el bootloader extrae
+# COMPLETO a una carpeta temporal en CADA arranque, y la borra al cerrar: son 10-40 s de
+# pantalla en blanco cada vez que se abre, peor desde unidad de red o con el antivirus
+# revisando cada DLL recien extraida. En onedir no hay nada que extraer y arranca en
+# segundos. El costo es entregar una carpeta en vez de un archivo suelto, que no cambia
+# nada para quien lo recibe porque la distribucion ya va en .zip.
 exe = EXE(
     pyz,
     a.scripts,
-    a.binaries,
-    a.datas,
     [],
+    exclude_binaries=True,  # las librerias las recoge COLLECT, no van dentro del .exe
     name="AutomationCostos",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
     upx=True,
-    upx_exclude=[],
-    runtime_tmpdir=None,
     console=False,
     disable_windowed_traceback=False,
     argv_emulation=False,
@@ -48,4 +53,14 @@ exe = EXE(
     codesign_identity=None,
     entitlements_file=None,
     icon=["automation_costos\\assets\\prgx-icon.ico"],
+)
+
+coll = COLLECT(
+    exe,
+    a.binaries,
+    a.datas,
+    strip=False,
+    upx=True,
+    upx_exclude=[],
+    name="AutomationCostos",
 )

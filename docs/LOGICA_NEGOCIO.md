@@ -466,3 +466,150 @@ prioridad". Se descarga **solo proveedor+año con cobertura EDI < 90%**, según 
 + `reporte_monica_extranjeros.xlsx`) y `scripts/beneficio_cpa.py`.
 
 Detalle en [reuniones/009-2026-08-10-enfoque-cobertura-90-monica.md](reuniones/009-2026-08-10-enfoque-cobertura-90-monica.md).
+
+---
+
+## Reporte consolidado de diferencias (2026-08-13 08:40:34)
+
+Pedido por **Héctor Saucedo**: un solo archivo de control con la diferencia de cada
+proveedor ejecutado, con **proveedor, periodo, monto y concepto**. Vive en la raíz de los
+entregables como `Reporte_Diferencias_Consolidado.xlsx` y lo produce
+`automation_costos/reporte_diferencias.py`.
+
+**Es un espejo, no un recálculo.** La fuente es la hoja `Consolidado` de cada
+`Validacion_*.xlsx` ya entregada. Por construcción el reporte cuadra al centavo con los
+entregables; si un número se ve raro, el error está en la Validación, no en el reporte.
+
+### Definición de los montos
+
+| Concepto | Cómo se obtiene |
+|---|---|
+| **Diferencia a reclamar** | Suma de `Diferencia Ajustada` (o `Diferencia` si el proveedor no trae devoluciones) de la hoja Consolidado. **Es idéntico al número de la hoja "Resumen" de esa Validación.** |
+| **Compensado por devoluciones** | Suma de `Ajuste Aplicado` de la hoja Ajustes (MR8M/KG-14). Informativo: **no se reclama**, ya se recuperó por devolución. |
+| **Diferencia detectada** | `Diferencia a reclamar` + `Compensado por devoluciones`. Es el hallazgo bruto de la auditoría. |
+
+### Definición del concepto
+
+1. Si el auditor escribió algo en `Observaciones Auditor`, **eso es el concepto**. El reporte
+   se afina solo conforme se trabajan los archivos.
+2. Si la celda trae un error de Excel (`#N/A`, `#REF!`, …) se ignora: es un BUSCARV roto, no
+   una clasificación. Celaya (73692) trae 26,319 `#N/A`.
+3. Si no hay clasificación, se deriva del dato: `Diferencia de costos`, o
+   `Diferencia de costos (parcialmente compensada)` cuando hubo devolución pero quedó saldo.
+
+**Proveedores sin una sola nota en el Consolidado.** No significa que no se les encontrara
+nada: si las devoluciones anularon **todas** sus diferencias, `aplicar_ajustes_a_consolidado`
+las saca del Consolidado y quedan solo en la hoja Ajustes. Se etiquetan
+`Compensado por devoluciones (nada que reclamar)`, no "Sin diferencias", y su periodo se toma
+de la **fecha de pago de la devolución** (la única que queda), marcado como tal en la propia
+celda para no mezclar bases en silencio. Son 5 proveedores y $3,787,583.77 ya recuperados:
+25133, 23873, 43398, 394213 y 61788. `Sin diferencias` se reserva para el caso real de cero.
+
+El concepto que se muestra a nivel proveedor es el que **concentra el dinero**, no el más
+frecuente: una nota grande pesa más para el control que veinte chicas.
+
+### Qué Validación representa a cada proveedor
+
+Una carpeta puede tener varias. La regla evita duplicar y evita tomar la equivocada:
+
+1. **`Rejecución_validación_pagos/` manda sobre todo.** Los 6 entregables que están ahí se
+   rehicieron ya con las devoluciones MR8M/KG-14; los de sus carpetas normales son de antes
+   de esa regla y **no traen hoja Ajustes**, así que sobrestiman el monto a reclamar. La
+   diferencia no es menor: Pepsico pasa de $160.6 M a $75.6 M, y en total son **$187.8 M**
+   de más. Son Arca (391250), Nestlé (5462), Celaya (73692), Selecta (741), Pepsico (76034)
+   y 3M (80622).
+2. Si no está reejecutado, la completa `Validacion_<carpeta>.xlsx` de su carpeta. Esa gana
+   sobre las variantes que conviven ahí: Arca guarda además `_2020` … `_2025` (subconjuntos
+   del mismo total) y Pepsico una reejecución parcial.
+3. Si no existe la completa, todas las `Validacion_<carpeta>_*.xlsx`, que ahí sí son
+   complementarias. (3M estaba así, partido en `_2020-2024` y `_2025`; ya no aplica porque
+   su reejecución trae un archivo único.)
+
+**Cómo se reconoce una corrida vieja:** no tiene hoja `Ajustes`. Si aparece otro proveedor
+en ese caso, su archivo bueno va a `Rejecución_validación_pagos/` y el reporte lo toma solo.
+
+### Histórico de montos
+
+El reporte lee el Excel de la Validación, así que refleja **siempre el último estado**. Si un
+auditor revisa un proveedor de $6.0 M y sus ajustes lo dejan en $5.6 M, el reporte diría
+$5.6 M y el monto original se perdería.
+
+`Historico_Diferencias.parquet` (en la raíz de entregables, junto al reporte) lo conserva: se
+anota un renglón por proveedor **cada vez que sus cifras cambian** — nunca se reescribe ni se
+borra. De ahí salen tres columnas del Resumen:
+
+- **Monto inicial** — lo que dio la primera corrida.
+- **Variación vs inicial** — cuánto se movió desde entonces (negativo = el auditor bajó el monto).
+- **Revisiones** — cuántas veces han cambiado sus cifras.
+
+Y la hoja **Historico de montos** trae la bitácora completa con fecha. Correr el reporte sin
+que nada cambie **no** agrega renglones.
+
+### Actualización automática
+
+Se regenera solo al terminar **cada** proveedor (enganche en
+`pipeline.generar_salida_proveedor` y `pipeline_streaming.generar_validacion_grande`, así que
+cubre la GUI, `cpa-salida` y los gigantes) y al cerrar un lote (`ejecutar_bloque1.py`). Es
+incremental: cachea por `(archivo, fecha, tamaño)`, así que un lote nuevo solo paga la lectura
+de lo nuevo. Un fallo del reporte **nunca** tumba el entregable del proveedor.
+
+Se escribe a un temporal y se mueve encima del destino: si alguien tiene el reporte abierto
+en Excel, el archivo bueno **queda intacto** y el mensaje dice qué hacer. La siguiente corrida
+lo pone al día sola.
+
+Regeneración manual: `python scripts/reporte_diferencias.py [--forzar]`.
+
+**Estado (2026-08-13, ya con la carpeta de reejecución):** 50 proveedores, 254,551 notas,
+**$1,025,482,778.03 detectados** → **$663,485,884.05 a reclamar** y $361,996,893.98 ya
+compensados por devoluciones.
+
+---
+
+## Las dos carpetas de CPA Vision y sus inventarios (2026-08-13)
+
+Dos carpetas hermanas, con propósito distinto. **Ninguna sustituye a la otra** y cada una
+lleva su propio `Inventario_CPA_Vision.xlsx`.
+
+| Carpeta | Qué contiene |
+|---|---|
+| `cpa_vision` | **TODO** lo descargado, sin filtro. El acervo completo. |
+| `cpa_vision_complemento` | **Solo** los proveedor-año con cobertura EDI **< 90%**. Es lo que se entrega como complemento. |
+
+Un proveedor puede estar en las dos con distinto alcance: FRABEL (7112) tiene 2020–2025 en el
+acervo y **solo 2025** en el complemento, porque sus otros años ya venían ≥90%.
+
+**Estar en el complemento se decide por cobertura, no por haberse descargado.** Procter
+(17222) se descargó porque la columna `accion` de Mónica lo pedía, pero no aparece en el
+objetivo `<90% EDI`, así que **no** va al complemento. Son dos criterios distintos.
+
+### Ambos procesos corren solos al cerrar un lote
+
+Enganchados en `cpa_vision.py`, **separados a propósito**: si uno falla el otro ya quedó
+escrito, y ninguno de los dos tumba un lote que costó horas.
+
+1. `inventario_cpa.actualizar_inventario()` → inventario de `cpa_vision`.
+2. `complemento_cpa.actualizar_complemento()` → copia las particiones y ZIP que falten al
+   complemento y regenera **su** inventario.
+
+Funciona igual desde el `.exe`.
+
+### Por qué el objetivo vive en un CSV
+
+Saber qué proveedor-año está bajo el 90% requiere el Excel de planeación (del repositorio) y
+resolver el RFC de cada proveedor contra SQL. **El `.exe` no tiene ninguna de las dos**, y no
+se quiere una consulta de minutos al cerrar cada lote.
+
+Por eso el objetivo se persiste en `cpa_vision_complemento/_objetivo_edi_menor_90.csv`:
+
+- lo **escribe** `scripts/complemento_cpa.py` (que sí tiene Excel y base);
+- lo **lee** `automation_costos/complemento_cpa.py`, que es lo que corre en cada lote.
+
+Como vive junto a los entregables en la unidad de red, el `.exe` siempre lo alcanza. Si el
+archivo falta, no se inventa nada: se avisa y no se copia.
+
+> ⚠️ **Cuando cambie la planeación** (proveedores o años nuevos en el objetivo) hay que
+> correr `python scripts/complemento_cpa.py` para reescribir ese CSV. Las descargas del día
+> a día ya se sincronizan solas.
+
+**Estado (2026-08-13):** acervo 452 RFC / 1,155 pares · complemento 204 RFC / 354 pares.
+Faltan 44 pares del objetivo por descargar.

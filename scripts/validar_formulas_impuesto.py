@@ -12,11 +12,12 @@ Uso:
 """
 
 from datetime import datetime
+import config
 from pathlib import Path
 
 import duckdb
 
-PARQUET = Path(__file__).resolve().parent.parent / "outputs" / "cpa_vision" / "parquet"
+PARQUET = config.CPA_VISION_PARQUET_DIR
 GLOB = f"{PARQUET.as_posix()}/**/*.parquet"
 TOL = 0.02  # tolerancia en pesos
 

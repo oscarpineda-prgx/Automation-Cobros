@@ -8,7 +8,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import config
 from automation_costos.cpa_vision import actualizar_metricas_totales
 
 if __name__ == "__main__":
-    actualizar_metricas_totales(Path("outputs/cpa_vision"))
+    actualizar_metricas_totales(config.CPA_VISION_DIR)

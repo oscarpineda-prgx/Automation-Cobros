@@ -182,6 +182,11 @@ def build_parser() -> argparse.ArgumentParser:
     cpa_salida.add_argument("--end", required=True, help="Fecha final YYYY-MM-DD")
     cpa_salida.add_argument("--parquet", required=True, help="Carpeta raiz del dataset Parquet")
     cpa_salida.add_argument("--output-dir", default=None, help="Carpeta de salida")
+    cpa_salida.add_argument("--sin-cpa", action="store_true", help="No cruzar con CPA Vision: el Compras sale con el EDI que ya trae de origen")
+    cpa_salida.add_argument(
+        "--cruzar-anios", nargs="+", type=int, default=None,
+        help="Cruzar con CPA solo estos años (el resto se deja sin CPA)",
+    )
 
     cpa_val = sub.add_parser(
         "cpa-validacion-grande",
@@ -192,6 +197,7 @@ def build_parser() -> argparse.ArgumentParser:
     cpa_val.add_argument("--end", required=True, help="Fecha final YYYY-MM-DD")
     cpa_val.add_argument("--parquet", required=True, help="Carpeta raiz del dataset Parquet")
     cpa_val.add_argument("--output-dir", default=None, help="Carpeta de salida")
+    cpa_val.add_argument("--sin-cpa", action="store_true", help="No cruzar con CPA Vision: el Compras sale con el EDI que ya trae de origen")
     cpa_val.add_argument("--por-mes", action="store_true", help="Partir por mes en vez de trimestre (menos memoria)")
 
     cpa_comp = sub.add_parser(
@@ -203,6 +209,7 @@ def build_parser() -> argparse.ArgumentParser:
     cpa_comp.add_argument("--end", required=True, help="Fecha final YYYY-MM-DD")
     cpa_comp.add_argument("--parquet", required=True, help="Carpeta raiz del dataset Parquet")
     cpa_comp.add_argument("--output-dir", default=None, help="Carpeta de salida")
+    cpa_comp.add_argument("--sin-cpa", action="store_true", help="No cruzar con CPA Vision: el Compras sale con el EDI que ya trae de origen")
     cpa_comp.add_argument("--por-mes", action="store_true", help="Partir por mes en vez de trimestre")
 
     exc_report = sub.add_parser(
@@ -239,7 +246,12 @@ def main() -> None:
         return
 
     if args.command == "validate":
-        write_validation_workbook(Path(args.input), Path(args.output))
+        from automation_costos.reporte_diferencias import actualizar_desde_validacion
+
+        salida = Path(args.output)
+        write_validation_workbook(Path(args.input), salida)
+        if actualizar_desde_validacion(salida):
+            print("Reporte consolidado de diferencias actualizado.")
         return
 
     if args.command == "cpa-salida":
@@ -248,7 +260,9 @@ def main() -> None:
 
         salida_dir = Path(args.output_dir) if args.output_dir else config.OUTPUT_DIR
         resultado = generar_salida_proveedor(
-            args.vendor, args.start, args.end, args.parquet, salida_dir
+            args.vendor, args.start, args.end, args.parquet, salida_dir,
+            usar_cpa=not args.sin_cpa,
+            anios_cruce=set(args.cruzar_anios) if args.cruzar_anios else None,
         )
         print(f"\nRFC: {resultado.rfc}")
         print(f"Carpeta   : {resultado.proveedor_dir}")
@@ -268,7 +282,8 @@ def main() -> None:
 
         salida_dir = Path(args.output_dir) if args.output_dir else config.OUTPUT_DIR
         resultado = generar_validacion_grande(
-            args.vendor, args.start, args.end, args.parquet, salida_dir, por_mes=args.por_mes
+            args.vendor, args.start, args.end, args.parquet, salida_dir,
+            por_mes=args.por_mes, usar_cpa=not args.sin_cpa,
         )
         print(f"\nRFC: {resultado.rfc}")
         print(f"Validacion: {resultado.validacion_path}")
@@ -281,7 +296,8 @@ def main() -> None:
 
         salida_dir = Path(args.output_dir) if args.output_dir else config.OUTPUT_DIR
         rutas = generar_compras_grande(
-            args.vendor, args.start, args.end, args.parquet, salida_dir, por_mes=args.por_mes
+            args.vendor, args.start, args.end, args.parquet, salida_dir,
+            por_mes=args.por_mes, usar_cpa=not args.sin_cpa,
         )
         print(f"\n{len(rutas)} archivos de Compras generados/presentes.")
         return

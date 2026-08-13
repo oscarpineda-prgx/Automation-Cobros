@@ -64,8 +64,12 @@ automation_costos/
   cpa_consolidator.py          Consolidación de salidas CPA
   cruce_cpa.py                 🔑 Cruce CPA Vision -> Compras (llena el bloque EDI)
   ajustes_pagos.py             🔑 Devoluciones MR8M/KG-14 (F_APV2) que anulan diferencias
+  reporte_diferencias.py       Reporte de control: proveedor, periodo, monto y concepto
+  inventario_cpa.py            Inventario del acervo CPA (se actualiza solo tras cada lote)
 scripts/
   log_cambio.py                Helper que estampa fecha/hora en la bitácora
+  reporte_diferencias.py       Regenera a mano el reporte consolidado de diferencias
+  ejecutar_bloque1.py          Corre un bloque de proveedores, uno por proceso
   validar_formulas_impuesto.py Doble validación de las fórmulas de impuesto (DuckDB)
 test_cruce_cpa.py              Prueba del cruce con datos reales de Alceda
 templates/                     Plantillas Excel base

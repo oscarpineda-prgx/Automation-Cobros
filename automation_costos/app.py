@@ -41,6 +41,8 @@ class CostosApp(ctk.CTk):
         super().__init__()
         self.tema = ui.Tema("light")
         self.mensajes: queue.Queue[str] = queue.Queue()
+        # Trabajo que los hilos de fondo necesitan que ejecute el hilo de la UI.
+        self.acciones: queue.Queue[tuple] = queue.Queue()
         self.indicadores = ui.Indicadores(self, self.tema)
         self._ocupado = False
 
@@ -52,9 +54,15 @@ class CostosApp(ctk.CTk):
         self.archivo_editado = ctk.StringVar(value="")
         self.archivo_recalculado = ctk.StringVar(value="")
         self.rfc = ctk.StringVar(value="")
-        self.carpeta_parquet = ctk.StringVar(value=str(config.OUTPUT_DIR / "cpa_vision" / "parquet"))
+        self.carpeta_parquet = ctk.StringVar(value=str(config.CPA_VISION_PARQUET_DIR))
+        self.carpeta_cpa = ctk.StringVar(value=str(config.CPA_VISION_DOWNLOAD_DIR))
         self.cpa_usuario = ctk.StringVar(value=config.CPA_VISION_USER)
         self.cpa_password = ctk.StringVar(value=config.CPA_VISION_PASSWORD)
+
+        # El aviso de "qué archivo se validará" se recalcula solo cada vez que cambia
+        # cualquiera de las dos rutas, sin importar quién las cambió.
+        self.archivo_editado.trace_add("write", self._refrescar_aviso_validacion)
+        self.archivo_recalculado.trace_add("write", self._refrescar_aviso_validacion)
 
         ctk.set_appearance_mode(self.tema.modo)
         ctk.set_default_color_theme("dark-blue")
@@ -189,6 +197,10 @@ class CostosApp(ctk.CTk):
             texto="  ✦  Generar Validación de Condiciones", clave="validar",
             comando=self._validar,
         )
+        # Deja a la vista QUE archivo se validaria, antes de hacer clic: es la defensa
+        # contra generar la Validacion de un proveedor con el Compras de otro.
+        self.aviso_validacion = ui.aviso(card, self.tema)
+        self._refrescar_aviso_validacion()
         ui.separador(card, self.tema)
         ui.boton_paso(
             card, self.tema, self.indicadores,
@@ -249,6 +261,11 @@ class CostosApp(ctk.CTk):
         fila_pq.pack(fill="x", padx=14)
         ui.campo(fila_pq, self.tema, etiqueta="Parquet", variable=self.carpeta_parquet, ancho=250)
         ui.boton_secundario(fila_pq, self.tema, texto="Elegir", comando=self._elegir_parquet)
+
+        fila_cpa = ctk.CTkFrame(card, fg_color="transparent")
+        fila_cpa.pack(fill="x", padx=14)
+        ui.campo(fila_cpa, self.tema, etiqueta="Descargas CPA", variable=self.carpeta_cpa, ancho=250)
+        ui.boton_secundario(fila_cpa, self.tema, texto="Elegir", comando=self._elegir_cpa)
 
     def _selector(self, parent: ctk.CTkFrame, etiqueta: str, variable: ctk.StringVar) -> None:
         fila = ctk.CTkFrame(parent, fg_color="transparent")
@@ -333,9 +350,19 @@ class CostosApp(ctk.CTk):
         self.bitacora.configure(state="disabled")
 
     def _procesar_mensajes(self) -> None:
+        """Unico punto donde los hilos de fondo llegan a tocar la interfaz."""
         try:
             while True:
                 self._escribir(self.mensajes.get_nowait())
+        except queue.Empty:
+            pass
+        try:
+            while True:
+                funcion, args = self.acciones.get_nowait()
+                try:
+                    funcion(*args)
+                except Exception as exc:  # noqa: BLE001 — una accion rota no frena la cola
+                    self._escribir(f"[UI] no se pudo aplicar un cambio: {exc}\n")
         except queue.Empty:
             pass
         self.after(120, self._procesar_mensajes)
@@ -366,6 +393,11 @@ class CostosApp(ctk.CTk):
         elegido = filedialog.askdirectory(initialdir=self.carpeta_parquet.get())
         if elegido:
             self.carpeta_parquet.set(elegido)
+
+    def _elegir_cpa(self) -> None:
+        elegido = filedialog.askdirectory(initialdir=self.carpeta_cpa.get())
+        if elegido:
+            self.carpeta_cpa.set(elegido)
 
     def _elegir_excel(self, variable: ctk.StringVar) -> None:
         elegido = filedialog.askopenfilename(filetypes=[("Excel", "*.xlsx *.xlsm")])
@@ -407,7 +439,7 @@ class CostosApp(ctk.CTk):
             df = fetch_compras(proveedor, inicio, fin)
             salida = self._ruta_salida(_nombre_compras(df, proveedor))
             write_compras_workbook(df, salida, vendor=proveedor, start_date=inicio, end_date=fin)
-            self.archivo_editado.set(str(salida))
+            self._fijar_compras(str(salida))
             self._log(f"Compras preliminar generado: {salida}")
             self._log(f"Filas extraídas: {len(df):,}")
 
@@ -421,19 +453,22 @@ class CostosApp(ctk.CTk):
         def tarea() -> None:
             salida = self._ruta_salida(f"{entrada.stem}_Recalculado.xlsx")
             recalculate_compras_file(entrada, salida)
-            self.archivo_recalculado.set(str(salida))
+            self._fijar(self.archivo_recalculado, str(salida))
             self._log(f"Compras recalculado generado: {salida}")
 
         self._ejecutar("recalcular", "Recalculando archivo de compras...", tarea)
 
     def _validar(self) -> None:
-        ruta = self.archivo_recalculado.get().strip() or self.archivo_editado.get().strip()
+        ruta = self._archivo_para_validar()
         if not ruta:
             self._elegir_excel(self.archivo_recalculado)
-            ruta = self.archivo_recalculado.get().strip()
+            ruta = self._archivo_para_validar()
         if not ruta:
             return
         entrada = Path(ruta)
+        # Se deja escrito en la bitacora el archivo exacto que se validó: si mas tarde hay
+        # dudas sobre un entregable, aqui esta de que Compras salio.
+        self._log(f"Validando sobre: {entrada.name}")
 
         def tarea() -> None:
             salida = self._ruta_salida(f"{entrada.stem}_Validacion_Condiciones.xlsx")
@@ -457,6 +492,7 @@ class CostosApp(ctk.CTk):
             )
             return
         parquet = Path(self.carpeta_parquet.get().strip())
+        descargas = self.carpeta_cpa.get().strip() or None
         rfc_forzado = self.rfc.get().strip().upper()
 
         def tarea() -> None:
@@ -471,7 +507,7 @@ class CostosApp(ctk.CTk):
                         "ERROR: no se pudo resolver el RFC (¿el proveedor no tiene compras en el periodo?)."
                     )
                     return
-                self.rfc.set(rfc)
+                self._fijar(self.rfc, rfc)
             self._log(f"RFC del proveedor: {rfc}")
 
             resultado = descargar_cpa_proveedor(
@@ -479,9 +515,10 @@ class CostosApp(ctk.CTk):
                 parquet_root=parquet,
                 username=usuario,
                 password=password,
+                download_dir=descargas,
                 log=self._log,
             )
-            self.carpeta_parquet.set(str(resultado.parquet_root))
+            self._fijar(self.carpeta_parquet, str(resultado.parquet_root))
             self._log(
                 f"✓ CPA Vision descargado: {resultado.filas:,} filas listas en el Parquet."
             )
@@ -507,7 +544,7 @@ class CostosApp(ctk.CTk):
                 proveedor, inicio, fin, parquet, self.carpeta_salida.get().strip() or config.OUTPUT_DIR,
                 log=self._log,
             )
-            self.archivo_editado.set(str(resultado.compras_path))
+            self._fijar_compras(str(resultado.compras_path))
             self._log(f"✓ Validación lista: {resultado.validacion_path}")
 
         self._ejecutar("salida", "Generando salida completa...", tarea)
@@ -535,12 +572,68 @@ class CostosApp(ctk.CTk):
                 self._log(linea)
             salida = self._ruta_salida(f"{entrada.stem}_EDI.xlsx")
             resultado.df.to_excel(salida, index=False)
-            self.archivo_editado.set(str(salida))
+            self._fijar_compras(str(salida))
             self._log(f"Salida: {salida}")
 
         self._ejecutar("cruce", "Cruzando CPA Vision...", tarea)
 
     # -- Infraestructura ----------------------------------------------------
+
+    def _en_ui(self, funcion, *args) -> None:
+        """Encola `funcion` para que la ejecute el hilo de la interfaz.
+
+        Tkinter exige que TODO lo que toca la ventana ocurra en el hilo principal, y las
+        tareas largas corren en un hilo aparte (`_ejecutar`). Un `StringVar.set()` no es
+        una asignacion inocente: dispara la actualizacion del widget que lo muestra, o sea
+        llamadas al interprete Tcl desde el hilo equivocado. El sintoma es un congelamiento
+        o un `RuntimeError: main thread is not in main loop` intermitente e irreproducible.
+
+        OJO: `self.after(...)` NO sirve para esto. `after` es a su vez una llamada a Tk
+        (registra un comando en el interprete), asi que invocarla desde el hilo de fondo es
+        exactamente el problema que se queria evitar; solo parece funcionar mientras el
+        mainloop este corriendo. La unica via segura es una cola: `queue.Queue` si es
+        thread-safe, y `_procesar_mensajes` —que ya corre en el hilo principal para la
+        bitacora— la vacia. Ese es el mismo patron que usa el log desde el primer dia.
+        """
+        self.acciones.put((funcion, args))
+
+    def _fijar(self, variable: ctk.StringVar, valor: str) -> None:
+        """`variable.set(valor)` seguro desde un hilo de fondo."""
+        self._en_ui(variable.set, valor)
+
+    def _fijar_compras(self, ruta: str) -> None:
+        """Registra un Compras nuevo y DESCARTA el recalculado anterior.
+
+        Un Compras nuevo invalida cualquier recalculado previo: son de otro proveedor o de
+        otra corrida. Si no se limpiara, `_validar` —que prefiere el recalculado— generaria
+        la Validacion del proveedor ANTERIOR sin avisar. La unica pista seria el nombre del
+        archivo de salida, y eso es un entregable incorrecto sostenido por que alguien se
+        fije. Ver la etiqueta bajo el boton de Validacion, que muestra el archivo elegido.
+        """
+        self._fijar(self.archivo_editado, ruta)
+        self._fijar(self.archivo_recalculado, "")
+
+    def _archivo_para_validar(self) -> str:
+        """El Compras que usaria 'Generar Validación': el recalculado si existe."""
+        return self.archivo_recalculado.get().strip() or self.archivo_editado.get().strip()
+
+    def _refrescar_aviso_validacion(self, *_) -> None:
+        """Mantiene visible QUE archivo se validaria, para verlo antes de hacer clic."""
+        etiqueta = getattr(self, "aviso_validacion", None)
+        if etiqueta is None:
+            return
+        ruta = self._archivo_para_validar()
+        if not ruta:
+            etiqueta.configure(
+                text="  Validará: (ningún archivo — se te pedirá al hacer clic)",
+                text_color=self.tema("t2"),
+            )
+            return
+        origen = "recalculado" if self.archivo_recalculado.get().strip() else "sin recalcular"
+        etiqueta.configure(
+            text=f"  Validará: {Path(ruta).name}  ·  {origen}",
+            text_color=self.tema("t1"),
+        )
 
     def _pedir_archivo(self, variable: ctk.StringVar) -> Path | None:
         ruta = variable.get().strip()
@@ -562,13 +655,15 @@ class CostosApp(ctk.CTk):
         self._log(mensaje)
         self.indicadores.estado(clave, "running")
 
+        # `envoltura` corre en otro hilo: nada de lo que hay aqui puede tocar Tk
+        # directamente. El log va por su cola y los indicadores por `_en_ui`.
         def envoltura() -> None:
             try:
                 tarea()
-                self.indicadores.estado(clave, "ok")
+                self._en_ui(self.indicadores.estado, clave, "ok")
             except Exception as exc:
                 self._log(f"ERROR: {exc}")
-                self.indicadores.estado(clave, "error")
+                self._en_ui(self.indicadores.estado, clave, "error")
             finally:
                 self._ocupado = False
 

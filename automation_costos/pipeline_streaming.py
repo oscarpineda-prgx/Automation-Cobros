@@ -50,6 +50,7 @@ from automation_costos.excel_exporter import escribir_libro_compras
 from automation_costos.pipeline import (
     ResultadoPipeline,
     _nombre_base,
+    actualizar_reporte_consolidado,
     copiar_soportes_cpa,
 )
 from automation_costos.utils import make_folio_series, to_number
@@ -83,6 +84,7 @@ def generar_salida_proveedor_por_anios(
     output_dir: Path | str,
     *,
     log: Callable[[str], None] = print,
+    usar_cpa: bool = True,
 ) -> ResultadoPipeline:
     """Genera Compras (un archivo por TRIMESTRE) + Validación consolidada, por trozos.
 
@@ -102,7 +104,7 @@ def generar_salida_proveedor_por_anios(
     # -- PASADA 1: por trimestre -> cruzar y acumular por folio y factura (sin guardar filas) --
     for etiqueta, ini, fin in intervalos:
         log(f"[pasada 1 · {etiqueta}] Compras desde SQL y cruce...")
-        salida = _salida_intervalo(vendor, ini, fin, parquet_root)
+        salida = _salida_intervalo(vendor, ini, fin, parquet_root, usar_cpa=usar_cpa)
         if salida is None:
             log("                   (sin renglones)")
             continue
@@ -131,7 +133,7 @@ def generar_salida_proveedor_por_anios(
     detalle_partes: list[pd.DataFrame] = []
     for iv in con_datos:
         log(f"[pasada 2 · {iv.etiqueta}] re-cruce y escritura del Compras...")
-        salida = _salida_intervalo(vendor, iv.ini, iv.fin, parquet_root)
+        salida = _salida_intervalo(vendor, iv.ini, iv.fin, parquet_root, usar_cpa=usar_cpa)
         if salida is None:  # no debería pasar (ya tuvo datos en la pasada 1)
             continue
         prepared, _, _ = salida
@@ -160,7 +162,10 @@ def generar_salida_proveedor_por_anios(
     write_validation_from_dataframe(df_dif, validacion_path)
     log(f"[validación] {validacion_path.name}")
 
-    soportes = copiar_soportes_cpa(rfc, parquet_root, proveedor_dir, log=log)
+    # Sin cruce no se copian soportes: el entregable no se apoya en ningun CFDI.
+    soportes = (
+        copiar_soportes_cpa(rfc, parquet_root, proveedor_dir, log=log) if usar_cpa else []
+    )
 
     return ResultadoPipeline(
         rfc=rfc,
@@ -199,6 +204,7 @@ def generar_validacion_grande(
     *,
     por_mes: bool = False,
     log: Callable[[str], None] = print,
+    usar_cpa: bool = True,
 ) -> ResultadoPipeline:
     """Genera SOLO la Validación consolidada de un proveedor gigante, rápido y sin OOM.
 
@@ -226,7 +232,7 @@ def generar_validacion_grande(
         intervalos = _intervalos_mes(start_date, end_date) if por_mes else _intervalos_trimestre(start_date, end_date)
         for etiqueta, ini, fin in intervalos:
             log(f"[{etiqueta}] auditables desde SQL + cruce...")
-            salida = _salida_intervalo(vendor, ini, fin, parquet_root, filtro_filas=FILTRO_AUDITABLES)
+            salida = _salida_intervalo(vendor, ini, fin, parquet_root, filtro_filas=FILTRO_AUDITABLES, usar_cpa=usar_cpa)
             if salida is None:
                 log("           (sin renglones)")
                 continue
@@ -308,7 +314,13 @@ def generar_validacion_grande(
         write_validation_streaming(consolidado_src, _chunks(), validacion_path)
         log(f"[validación] {validacion_path.name}")
 
-        soportes = copiar_soportes_cpa(rfc, parquet_root, proveedor_dir, log=log)
+        # Sin cruce no se copian soportes (mismo criterio que el camino normal).
+        soportes = (
+            copiar_soportes_cpa(rfc, parquet_root, proveedor_dir, log=log) if usar_cpa else []
+        )
+        # Los gigantes se corren con `cpa-validacion-grande`, que no pasa por
+        # `generar_salida_proveedor`; sin este enganche quedarían fuera del reporte de control.
+        actualizar_reporte_consolidado(output_dir, log=log)
         return ResultadoPipeline(
             rfc=rfc,
             compras_path=validacion_path,  # no hay Compras en este modo; se apunta a la Validación
@@ -330,6 +342,7 @@ def generar_compras_grande(
     *,
     por_mes: bool = False,
     log: Callable[[str], None] = print,
+    usar_cpa: bool = True,
 ) -> list[Path]:
     """Escribe SOLO los archivos de Compras de un proveedor gigante, por intervalo, resumible.
 
@@ -361,7 +374,7 @@ def generar_compras_grande(
             rutas.append(output_dir / base / f"Compras_{base}_{etiqueta}.xlsx")
             continue
 
-        salida = _salida_intervalo(vendor, ini, fin, parquet_root)  # sin filtro: TODOS los renglones
+        salida = _salida_intervalo(vendor, ini, fin, parquet_root, usar_cpa=usar_cpa)  # sin filtro: TODOS los renglones
         if salida is None:
             log(f"[{etiqueta}] sin renglones")
             continue
@@ -396,7 +409,8 @@ def _intervalos_mes(start_date: str, end_date: str) -> list[tuple[str, str, str]
 
 
 def _salida_intervalo(
-    vendor: str, ini: str, fin: str, parquet_root: Path | str, *, filtro_filas: str = ""
+    vendor: str, ini: str, fin: str, parquet_root: Path | str, *,
+    filtro_filas: str = "", usar_cpa: bool = True,
 ) -> tuple[pd.DataFrame, str, str] | None:
     """Trae un intervalo, lo cruza con CPA y lo deja preparado + con valores de fórmula.
 
@@ -414,10 +428,15 @@ def _salida_intervalo(
         set(raw["invnbr"].map(normalizar_factura)) - {""},
         set(raw["invnbr"].map(solo_digitos)) - {""},
     )
-    cpa = cargar_cpa(rfc, parquet_root, barcodes=barcodes, facturas=facturas)
-    # en_sitio: sin copias extra (poseemos raw y cpa de este año); es lo que hace caber en RAM.
-    prepared = prepare_compras_dataframe(cruzar(raw, cpa, en_sitio=True).df, en_sitio=True)
-    del cpa
+    if usar_cpa:
+        cpa = cargar_cpa(rfc, parquet_root, barcodes=barcodes, facturas=facturas)
+        # en_sitio: sin copias extra (poseemos raw y cpa de este año); es lo que hace caber en RAM.
+        prepared = prepare_compras_dataframe(cruzar(raw, cpa, en_sitio=True).df, en_sitio=True)
+        del cpa
+    else:
+        # Sin cruce: el Compras sale con el EDI que ya traia de origen. Es la ejecucion que
+        # pide la columna `accion` cuando dice solo "Ejecutar".
+        prepared = prepare_compras_dataframe(raw, en_sitio=True)
     prepared = apply_display_formula_values(prepared, en_sitio=True)[COMPRAS_COLUMNS]
     gc.collect()
     return prepared, rfc, base

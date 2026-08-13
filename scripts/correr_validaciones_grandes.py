@@ -13,11 +13,12 @@ import subprocess
 import sys
 import time
 from datetime import datetime
+import config
 from pathlib import Path
 
 RAIZ = Path(__file__).resolve().parent.parent
 PY = RAIZ / ".venv" / "Scripts" / "python.exe"
-PARQUET = "outputs/cpa_vision/parquet"
+PARQUET = str(config.CPA_VISION_PARQUET_DIR)
 OUTDIR = "outputs"
 PROVEEDORES = [
     ("391250", "2020-01-01", "2025-12-31", "ARCA CONTINENTAL"),

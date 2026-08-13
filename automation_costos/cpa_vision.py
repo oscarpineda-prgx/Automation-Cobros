@@ -489,6 +489,18 @@ def request_vendor_master_batch(
 
             _resumen_batch(metrics_file)
             actualizar_metricas_totales(settings.download_dir)
+            # El inventario que consultan los auditores se regenera solo al cerrar el lote,
+            # para que nadie tenga que copiarlo a mano. No lanza: ver actualizar_inventario.
+            from automation_costos.inventario_cpa import actualizar_inventario
+
+            actualizar_inventario(parquet_root)
+            # Segundo proceso, INDEPENDIENTE del anterior: la carpeta de complemento se
+            # queda solo con los proveedor-año de cobertura EDI < 90% y lleva su propio
+            # inventario. Va aparte a proposito — si el complemento falla, el inventario
+            # general ya quedo escrito, y al reves igual. Ninguno de los dos tumba el lote.
+            from automation_costos.complemento_cpa import actualizar_complemento
+
+            actualizar_complemento(settings.download_dir)
             print(f"Metricas CPA Vision: {metrics_file}", flush=True)
             if keep_open and not settings.headless:
                 input("Presiona Enter para cerrar el navegador...")

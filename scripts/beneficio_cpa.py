@@ -26,10 +26,11 @@ sys.path.insert(0, str(RAIZ))
 
 import pandas as pd
 
+import config
 from automation_costos.cruce_cpa import cargar_cpa, cruzar, rfc_de_compras, solo_digitos
 from automation_costos.database import fetch_compras
 
-PARQUET = RAIZ / "outputs" / "cpa_vision" / "parquet"
+PARQUET = config.CPA_VISION_PARQUET_DIR
 PLAN = RAIZ / "Planeacion vs %EDI poblado Soriana.xlsx"
 SALIDA = RAIZ / "outputs" / "beneficio_cpa_por_anio.xlsx"
 PERIODO = ("2020-01-01", "2026-03-31")
