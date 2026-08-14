@@ -12,6 +12,7 @@ from typing import Any
 import pandas as pd
 
 import config
+from automation_costos.cancelacion import SenalCancelacion, revisar
 from automation_costos.cpa_parquet import zip_to_parquet_dataset
 from automation_costos.utils import ensure_parent, safe_filename
 
@@ -208,6 +209,7 @@ def request_download_and_wait(
     poll_seconds: int = 20,
     max_wait_minutes: int = 420,
     keep_open: bool = False,
+    cancelado: SenalCancelacion | None = None,
 ) -> Path:
     """Create the CPA Vision CSV request and download the resulting ZIP."""
     _require_playwright()
@@ -257,9 +259,10 @@ def request_download_and_wait(
                 settings.download_dir,
                 poll_seconds=poll_seconds,
                 max_wait_minutes=max_wait_minutes,
-                    settings=settings,
-                    username=username,
-                    password=password,
+                settings=settings,
+                username=username,
+                password=password,
+                cancelado=cancelado,
             )
             print(f"ZIP descargado: {output_path}", flush=True)
             if keep_open and not settings.headless:
@@ -1548,6 +1551,7 @@ def _wait_for_request_zip(
     rfc: str | None = None,
     years: Any = None,
     regenerate_after_missing: int = 30,
+    cancelado: SenalCancelacion | None = None,
 ) -> Path:
     _open_solicitudes(page)
     deadline = time.monotonic() + max_wait_minutes * 60
@@ -1558,6 +1562,10 @@ def _wait_for_request_zip(
     missing_streak = 0
     attempt = 1
     while True:
+        # Punto seguro para atender una cancelación: entre dos sondeos no hay nada a medio
+        # escribir. Aquí es donde la espera pasa las horas, así que basta con revisarlo aquí
+        # para que el botón "Detener" responda en cuestión de segundos.
+        revisar(cancelado, f"esperando la solicitud {request_id}")
         # Refresco preventivo: aunque todo vaya bien, cada `reauth_every_attempts` intentos
         # reiniciamos la sesión (login de nuevo) y volvemos a solicitudes. Evita sesiones
         # de horas que el portal pueda invalidar silenciosamente sin redirigir.

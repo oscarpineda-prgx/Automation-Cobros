@@ -12,6 +12,18 @@
 
 <!-- NUEVAS ENTRADAS ARRIBA -->
 
+### 2026-08-14 08:10:18 — [CÓDIGO] GUI: descarga sin ventana, boton Detener y rutas/fechas por defecto
+
+Peticion de Oscar. 1) Casilla 'Descargar sin ventana (en segundo plano)' en la tarjeta CPA: pasa headless a CPAVisionSettings (el soporte ya existia, faltaba exponerlo). 2) Boton Detener con cancelacion COOPERATIVA: nuevo automation_costos/cancelacion.py (SenalCancelacion, CancelacionSolicitada, revisar). No se mata el hilo -dejaria Excel a medias y navegadores huerfanos-; la senal se revisa en el bucle de sondeo de _wait_for_request_zip, que es donde la descarga pasa las horas, asi que responde en segundos. El parametro cancelado es OPCIONAL en toda la cadena: sin el, comportamiento identico al anterior. 3) Salida por defecto = config.ENTREGABLES_DIR (X:\...\Proceso Validacion de condiciones) en vez de outputs/: con outputs/ la ETAPA 2 dejaba el paquete del proveedor fuera del acervo y creaba un reporte de diferencias suelto ahi. 4) Fechas por defecto 2020-01-01 a 2026-01-31 como constantes, no calculadas desde hoy. Nuevos widgets ui.casilla y ui.boton_peligro. Verificado construyendo la ventana de verdad. .exe reconstruido.
+
+---
+
+### 2026-08-13 14:34:36 — [BUG] F_APV2 se consultaba solo hasta 31-dic-2025: se perdian TODAS las devoluciones de 2026
+
+Hallazgo de Monica en FRABEL 9647: la nota 2649467 tenia un KG-14 de 136,906.68 del 20-ene-2026 que no se aplicaba. Validado contra la base: la llave (proveedor+nota+tienda) SIEMPRE estuvo bien (StrNbr 5537, RcpNbr 2649467 casan exacto); el registro no se leia porque PERIODO_FIN era 12/31/2025. Solo en FRABEL se perdian 254 movimientos KG y 8.9M. Corregido a 3/31/2026, el ultimo corte de pagos recibido del cliente (indicacion de Monica) y cierre del periodo 2025. Verificado: el caso de Monica ahora cierra en 0.00. Se evaluo y DESCARTO un respaldo por factura para los KG sin nota/tienda: resultaron asientos globales (VIAJES BACK HAUL, DESCTO X MANIOBR, APORTACION ECOM, partidas de hasta -47M), cruzarlos por factura borraria diferencias reales. IMPACTO: todo entregable anterior a hoy sobrestima y hay que reejecutar.
+
+---
+
 ### 2026-08-13 12:48:33 — [CÓDIGO] El complemento CPA se actualiza solo al cerrar cada lote, tambien desde el .exe
 
 Peticion de Oscar: que al descargar un proveedor queden al dia las DOS carpetas y los DOS inventarios, con procesos separados. Antes solo se actualizaba el inventario de cpa_vision; el complemento era un script manual (y por eso se habia quedado con corte de un dia antes). Nuevo automation_costos/complemento_cpa.py (copia + inventario del complemento) enganchado en cpa_vision.py aparte del inventario general, cada uno en su try/except. El obstaculo era que el objetivo <90% EDI sale del Excel de planeacion + SQL, que el .exe no tiene: se resolvio persistiendolo en cpa_vision_complemento/_objetivo_edi_menor_90.csv, que escribe scripts/complemento_cpa.py y lee el paquete. Verificado que el modulo corre sin importar nada de scripts/ y sin SQL. Nuevo config.CPA_VISION_COMPLEMENTO_DIR. .exe reconstruido.

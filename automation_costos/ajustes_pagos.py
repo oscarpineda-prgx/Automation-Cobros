@@ -33,10 +33,20 @@ import config
 from automation_costos.cruce_cpa import normalizar_factura
 from automation_costos.utils import to_number
 
-# Periodo de la auditoría; F_APV2 se consulta con un rango amplio para no perder ninguna
-# devolución (las facturas van de 2020 a 2025).
+# Periodo con el que se consulta F_APV2. El fin es **el último corte de pagos que recibimos
+# del cliente: 31-mar-2026** (indicación de Mónica, 2026-08-13), que coincide con el cierre
+# del periodo 2025 de la auditoría (reunión 008).
+#
+# El corte anterior (31-dic-2025) dejaba fuera todas las devoluciones de 2026. Lo detectó
+# Mónica en FRABEL (9647): la nota 2649467 tenía un KG-14 de $136,906.68 con fecha 20-ene-26
+# que nunca se aplicaba. Solo en ese proveedor se perdían 254 movimientos KG y $8.9 M.
+#
+# Ampliarlo es seguro: una devolución solo se aplica si su nota+tienda coincide con un folio
+# que YA está en el Consolidado, y ese está acotado al periodo auditado. Lo que no cruza, no
+# hace nada. Medido en FRABEL: más allá de marzo-2026 no existe un solo registro más, así que
+# este corte no deja nada fuera de lo que hoy hay en la base.
 PERIODO_INICIO = "1/1/2020"
-PERIODO_FIN = "12/31/2025"
+PERIODO_FIN = "3/31/2026"
 
 # Columnas de la hoja "Ajustes" (bitácora de cada devolución: compensada o pendiente).
 AJUSTES_COLUMNS = [
@@ -187,6 +197,11 @@ def aplicar_ajustes(
             # MR8M no trae nota ni tienda: se liga por proveedor + factura.
             cruza = (prov == p_prov) & (fac == normalizar_factura(pago.invnbr))
         else:  # KG: se liga por nota de entrada (RcpNbr) + tienda (StrNbr) = el folio exacto.
+            # NO se agrega un respaldo por factura para los KG sin nota/tienda. Se evaluó el
+            # 2026-08-13 y se descartó con dato: en FRABEL esos registros no son devoluciones
+            # de nota, son asientos globales ("VIAJES BACK HAUL", partidas sin concepto de
+            # hasta -$47 M). Cruzarlos por factura borraría diferencias reales. El filtro
+            # `BSAK_BSIK_XREF3` que empieza en "14" es justo lo que nos protege de ellos.
             cruza = (prov == p_prov) & (nota == _norm_code(pago.rcpnbr)) & (tienda == _norm_code(pago.strnbr))
 
         indices = list(con.index[cruza])

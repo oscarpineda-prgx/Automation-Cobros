@@ -23,11 +23,18 @@ from PIL import Image
 
 import config
 from automation_costos import ui
+from automation_costos.cancelacion import CancelacionSolicitada
 from automation_costos.database import fetch_compras, resolver_rfc, test_connection
 from automation_costos.excel_exporter import write_compras_workbook
 from automation_costos.recalculate import recalculate_compras_file
 from automation_costos.utils import clean_code, safe_filename
 from automation_costos.validation_exporter import write_validation_workbook
+
+# Periodo por omisión de la auditoría. Se deja como constante (y no calculado desde la fecha
+# de hoy) porque el alcance lo fija el cliente, no el calendario: cambiarlo debe ser una
+# decisión explícita, no algo que se mueva solo al cambiar de año.
+PERIODO_INICIAL = "2020-01-01"
+PERIODO_FINAL = "2026-01-31"
 
 _TOKENS_ERROR = ("error", "exception", "traceback")
 _TOKENS_OK = (
@@ -45,12 +52,14 @@ class CostosApp(ctk.CTk):
         self.acciones: queue.Queue[tuple] = queue.Queue()
         self.indicadores = ui.Indicadores(self, self.tema)
         self._ocupado = False
+        # Cancelación cooperativa: el botón "Detener" la activa y el trabajo la atiende en su
+        # siguiente punto seguro. No se mata el hilo (dejaría archivos a medias).
+        self._cancelacion = threading.Event()
 
-        hoy = date.today()
         self.proveedor = ctk.StringVar(value="")
-        self.fecha_inicial = ctk.StringVar(value=f"{hoy.year - 6}-01-01")
-        self.fecha_final = ctk.StringVar(value=f"{hoy.year - 1}-01-01")
-        self.carpeta_salida = ctk.StringVar(value=str(config.OUTPUT_DIR))
+        self.fecha_inicial = ctk.StringVar(value=PERIODO_INICIAL)
+        self.fecha_final = ctk.StringVar(value=PERIODO_FINAL)
+        self.carpeta_salida = ctk.StringVar(value=str(config.ENTREGABLES_DIR))
         self.archivo_editado = ctk.StringVar(value="")
         self.archivo_recalculado = ctk.StringVar(value="")
         self.rfc = ctk.StringVar(value="")
@@ -58,6 +67,7 @@ class CostosApp(ctk.CTk):
         self.carpeta_cpa = ctk.StringVar(value=str(config.CPA_VISION_DOWNLOAD_DIR))
         self.cpa_usuario = ctk.StringVar(value=config.CPA_VISION_USER)
         self.cpa_password = ctk.StringVar(value=config.CPA_VISION_PASSWORD)
+        self.cpa_sin_ventana = ctk.BooleanVar(value=config.CPA_VISION_HEADLESS)
 
         # El aviso de "qué archivo se validará" se recalcula solo cada vez que cambia
         # cualquiera de las dos rutas, sin importar quién las cambió.
@@ -161,6 +171,9 @@ class CostosApp(ctk.CTk):
         ui.campo(barra, self.tema, etiqueta="Salida", variable=self.carpeta_salida, ancho=300)
         ui.boton_secundario(barra, self.tema, texto="Elegir", comando=self._elegir_salida)
         ui.boton_secundario(barra, self.tema, texto="↺  Limpiar", comando=self._limpiar_campos)
+        self.boton_detener = ui.boton_peligro(
+            barra, self.tema, texto="■  Detener", comando=self._detener
+        )
 
     # -- Tarjetas -----------------------------------------------------------
 
@@ -266,6 +279,14 @@ class CostosApp(ctk.CTk):
         fila_cpa.pack(fill="x", padx=14)
         ui.campo(fila_cpa, self.tema, etiqueta="Descargas CPA", variable=self.carpeta_cpa, ancho=250)
         ui.boton_secundario(fila_cpa, self.tema, texto="Elegir", comando=self._elegir_cpa)
+
+        fila_modo = ctk.CTkFrame(card, fg_color="transparent")
+        fila_modo.pack(fill="x", padx=14)
+        ui.casilla(
+            fila_modo, self.tema,
+            texto="Descargar sin ventana (en segundo plano)",
+            variable=self.cpa_sin_ventana,
+        )
 
     def _selector(self, parent: ctk.CTkFrame, etiqueta: str, variable: ctk.StringVar) -> None:
         fila = ctk.CTkFrame(parent, fg_color="transparent")
@@ -494,6 +515,7 @@ class CostosApp(ctk.CTk):
         parquet = Path(self.carpeta_parquet.get().strip())
         descargas = self.carpeta_cpa.get().strip() or None
         rfc_forzado = self.rfc.get().strip().upper()
+        sin_ventana = bool(self.cpa_sin_ventana.get())
 
         def tarea() -> None:
             from automation_costos.cpa_descarga import descargar_cpa_proveedor
@@ -517,6 +539,8 @@ class CostosApp(ctk.CTk):
                 password=password,
                 download_dir=descargas,
                 log=self._log,
+                headless=sin_ventana,
+                cancelado=self._cancelacion.is_set,
             )
             self._fijar(self.carpeta_parquet, str(resultado.parquet_root))
             self._log(
@@ -647,11 +671,31 @@ class CostosApp(ctk.CTk):
         carpeta.mkdir(parents=True, exist_ok=True)
         return carpeta / nombre
 
+    def _detener(self) -> None:
+        """Pide detener la operación en curso (cancelación cooperativa).
+
+        No se mata el hilo: eso dejaría Excel a medio escribir y navegadores huérfanos. Se
+        levanta la señal y el trabajo para en su siguiente punto seguro. En la descarga de
+        CPA ese punto es entre dos sondeos del portal, así que responde en segundos; en un
+        paso que ya está escribiendo un archivo, termina ese paso antes de parar.
+        """
+        if not self._ocupado:
+            return
+        self._cancelacion.set()
+        self._habilitar_detener(False)
+        self._log("Deteniendo... se cancelará en el siguiente punto seguro.")
+
+    def _habilitar_detener(self, activo: bool) -> None:
+        """Enciende o apaga el botón Detener. Solo desde el hilo de la interfaz."""
+        self.boton_detener.configure(state="normal" if activo else "disabled")
+
     def _ejecutar(self, clave: str, mensaje: str, tarea) -> None:
         if self._ocupado:
             self._log("Hay una operación en curso; espera a que termine.")
             return
         self._ocupado = True
+        self._cancelacion.clear()
+        self._habilitar_detener(True)
         self._log(mensaje)
         self.indicadores.estado(clave, "running")
 
@@ -661,11 +705,16 @@ class CostosApp(ctk.CTk):
             try:
                 tarea()
                 self._en_ui(self.indicadores.estado, clave, "ok")
+            except CancelacionSolicitada:
+                # Parada pedida por el usuario: no es un fallo, se distingue en la bitácora.
+                self._log("Operación detenida por el usuario.")
+                self._en_ui(self.indicadores.estado, clave, "idle")
             except Exception as exc:
                 self._log(f"ERROR: {exc}")
                 self._en_ui(self.indicadores.estado, clave, "error")
             finally:
                 self._ocupado = False
+                self._en_ui(self._habilitar_detener, False)
 
         threading.Thread(target=envoltura, daemon=True).start()
 

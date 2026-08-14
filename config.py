@@ -63,6 +63,10 @@ CPA_VISION_DIR = Path(
     )
 )
 CPA_VISION_DOWNLOAD_DIR = Path(os.getenv("CPA_VISION_DOWNLOAD_DIR", str(CPA_VISION_DIR)))
+# Donde viven los entregables por proveedor (una carpeta por proveedor) y el reporte
+# consolidado. Es la salida por omisión de la GUI: si apuntara a `outputs/`, la ETAPA 2
+# dejaría el paquete del proveedor fuera del acervo y crearía un reporte suelto ahí.
+ENTREGABLES_DIR = Path(os.getenv("ENTREGABLES_DIR", str(CPA_VISION_DIR.parent)))
 # Carpeta hermana con SOLO los proveedor-año de cobertura EDI < 90% (lo que se entrega como
 # complemento). `CPA_VISION_DIR` conserva TODO lo descargado, sin filtro.
 CPA_VISION_COMPLEMENTO_DIR = Path(

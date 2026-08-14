@@ -368,6 +368,48 @@ def campo(
     return entrada
 
 
+def casilla(
+    parent: ctk.CTkFrame, tema: Tema, *, texto: str, variable: ctk.BooleanVar
+) -> ctk.CTkCheckBox:
+    """Casilla de opción con el lenguaje visual del proyecto."""
+    control = ctk.CTkCheckBox(
+        parent,
+        text=texto,
+        variable=variable,
+        font=ctk.CTkFont(FUENTE, 11),
+        text_color=tema("t2"),
+        fg_color=tema("accent"),
+        hover_color=tema("cta_h"),
+        border_color=tema("border"),
+        checkbox_width=18,
+        checkbox_height=18,
+        corner_radius=4,
+    )
+    control.pack(side="left", padx=(10, 4), pady=10)
+    return control
+
+
+def boton_peligro(
+    parent: ctk.CTkFrame, tema: Tema, *, texto: str, comando: Callable[[], None], ancho: int = 90
+) -> ctk.CTkButton:
+    """Botón de acción destructiva/interruptora (detener). Nace deshabilitado."""
+    boton = ctk.CTkButton(
+        parent,
+        text=texto,
+        width=ancho,
+        height=30,
+        font=ctk.CTkFont(FUENTE, 11, weight="bold"),
+        fg_color=tema("s_err"),
+        hover_color=tema("s_err"),
+        text_color="#FFFFFF",
+        corner_radius=6,
+        command=comando,
+        state="disabled",
+    )
+    boton.pack(side="left", padx=6, pady=12)
+    return boton
+
+
 def boton_secundario(
     parent: ctk.CTkFrame, tema: Tema, *, texto: str, comando: Callable[[], None], ancho: int = 80
 ) -> ctk.CTkButton:

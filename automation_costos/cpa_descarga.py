@@ -18,6 +18,7 @@ from typing import Callable
 
 import pandas as pd
 
+from automation_costos.cancelacion import SenalCancelacion
 from automation_costos.cpa_parquet import zip_to_parquet_dataset
 from automation_costos.cpa_vision import CPAVisionSettings, request_download_and_wait
 
@@ -52,6 +53,8 @@ def descargar_cpa_proveedor(
     poll_seconds: int = 20,
     max_wait_minutes: int = 420,
     log: Callable[[str], None] = print,
+    headless: bool | None = None,
+    cancelado: SenalCancelacion | None = None,
 ) -> ResultadoDescarga:
     """Solicita la descarga del proveedor en CPA Vision y la deja lista en Parquet.
 
@@ -73,6 +76,11 @@ def descargar_cpa_proveedor(
 
     settings = settings or CPAVisionSettings()
     settings.download_dir = download_dir
+    # `headless=None` respeta lo que traiga la configuración; la GUI lo fuerza con su casilla.
+    if headless is not None:
+        settings.headless = headless
+    if settings.headless:
+        log("      Modo sin ventana: el navegador trabaja en segundo plano.")
 
     anios = _anios(start_date, end_date)
     log(
@@ -89,6 +97,7 @@ def descargar_cpa_proveedor(
         poll_seconds=poll_seconds,
         max_wait_minutes=max_wait_minutes,
         keep_open=False,
+        cancelado=cancelado,
     )
     # El nombre del ZIP empieza con el id de solicitud: "<request_id>_...zip".
     request_id = zip_path.name.split("_", 1)[0]

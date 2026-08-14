@@ -613,3 +613,49 @@ archivo falta, no se inventa nada: se avisa y no se copia.
 
 **Estado (2026-08-13):** acervo 452 RFC / 1,155 pares · complemento 204 RFC / 354 pares.
 Faltan 44 pares del objetivo por descargar.
+
+---
+
+## Corte de la consulta de devoluciones MR8M / KG-14 (2026-08-13)
+
+**`F_APV2` se consulta del 1-ene-2020 al 31-mar-2026**, que es el **último corte de pagos
+recibido del cliente** (indicación de Mónica) y coincide con el cierre del periodo 2025
+(reunión 008).
+
+### El error que corrige
+
+El corte anterior era **31-dic-2025**, así que **ninguna devolución de 2026 se leía**. Como
+el periodo 2025 se extiende hasta marzo-2026, eso dejaba fuera un bloque grande de ajustes ya
+compensados, y los entregables reclamaban diferencias que en realidad ya estaban recuperadas.
+
+Lo detectó **Mónica** en FRABEL (9647): la nota 2649467 tenía un KG-14 de **$136,906.68** con
+fecha 20-ene-2026 que nunca se aplicaba. Medido en ese solo proveedor:
+
+| Corte | KG leídos | Devoluciones |
+|---|---:|---:|
+| 31-dic-2025 (anterior) | 4,036 | −73,910,850 |
+| 31-mar-2026 (correcto) | **4,290** | **−82,810,824** |
+
+254 movimientos y $8.9 M perdidos **en un proveedor**. Afecta a todos.
+
+> ⚠️ Todo entregable generado **antes del 2026-08-13** se calculó con el corte corto y
+> sobrestima la diferencia a reclamar. Hay que reejecutar.
+
+### No es un problema de llave
+
+La hipótesis inicial fue que el cruce fallaba por usar la factura. **No**: el KG-14 traía
+`StrNbr 5537` y `RcpNbr 2649467`, que casan exacto con el folio del Consolidado. La llave
+(proveedor + nota + tienda) siempre estuvo bien; el registro simplemente no se leía.
+
+### Por qué NO se agrega un respaldo por factura para los KG sin nota/tienda
+
+Se evaluó y **se descartó con dato**. Los KG negativos que no traen nota ni tienda tampoco
+traen `BSAK_BSIK_XREF3`, así que ya los excluye el filtro de "empieza en 14". Al inspeccionar
+qué son en FRABEL resultaron **asientos globales**, no devoluciones de nota: "VIAJES BACK
+HAUL", "DESCTO X MANIOBR", "APORTACION ECOM" y partidas sin concepto de hasta **−$47 M**.
+
+Cruzarlos por factura borraría diferencias reales de golpe. **El filtro `XREF3` que empieza en
+"14" es justo lo que nos protege de ellos**, no una limitación.
+
+Si más adelante negocio quiere considerar maniobras o aportaciones, es una **regla nueva** que
+debe definir Mónica o Luis, con su propio tipo y su propia llave — no un parche a KG-14.
