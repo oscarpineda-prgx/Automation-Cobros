@@ -187,6 +187,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--cruzar-anios", nargs="+", type=int, default=None,
         help="Cruzar con CPA solo estos años (el resto se deja sin CPA)",
     )
+    cpa_salida.add_argument(
+        "--anios", nargs="+", type=int, default=None,
+        help="Años que van al entregable. Recorta los renglones a estos años y los anuncia "
+             "en el titulo. Sirve cuando la planeacion pide años salteados (2020 2022 2025)",
+    )
 
     cpa_val = sub.add_parser(
         "cpa-validacion-grande",
@@ -263,6 +268,7 @@ def main() -> None:
             args.vendor, args.start, args.end, args.parquet, salida_dir,
             usar_cpa=not args.sin_cpa,
             anios_cruce=set(args.cruzar_anios) if args.cruzar_anios else None,
+            anios=set(args.anios) if args.anios else None,
         )
         print(f"\nRFC: {resultado.rfc}")
         print(f"Carpeta   : {resultado.proveedor_dir}")
@@ -305,9 +311,26 @@ def main() -> None:
     if args.command == "cpa-cruce":
         from automation_costos.cruce_cpa import cruzar_proveedor
 
+        from automation_costos.metricas_cruce import fila_desde_resultado
+        from automation_costos.metricas_cruce import registrar as registrar_metricas
+        from automation_costos.utils import clean_code
+
         resultado, rfc = cruzar_proveedor(args.compras, args.parquet, rfc=args.rfc)
         print(f"RFC del proveedor: {rfc}\n")
         print(resultado.resumen())
+        # El mismo resumen, guardado en el reporte comun (no solo impreso en pantalla).
+        proveedor = ""
+        if "vndnbr" in resultado.df.columns and resultado.df["vndnbr"].notna().any():
+            proveedor = clean_code(resultado.df["vndnbr"].dropna().iloc[0])
+        nombre = ""
+        if "vndname" in resultado.df.columns and resultado.df["vndname"].notna().any():
+            nombre = str(resultado.df["vndname"].dropna().iloc[0]).strip()
+        registrar_metricas(
+            fila_desde_resultado(
+                resultado, proveedor=proveedor, nombre=nombre, rfc=rfc,
+                origen="cruce manual (terminal)",
+            )
+        )
         resultado.df.to_excel(Path(args.output), index=False)
         print(f"\nSalida: {args.output}")
         return

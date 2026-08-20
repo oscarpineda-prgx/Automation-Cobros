@@ -97,6 +97,36 @@ def main() -> None:
     )
     doc.add_paragraph()
 
+    # El periodo auditado, en el encabezado de cada hoja.
+    _titulo(doc, "El periodo auditado va en el encabezado", size=13)
+    _parrafo(
+        doc,
+        "Todas las hojas llevan, bajo el nombre del proveedor, el periodo que se auditó:",
+    )
+    _tabla(
+        doc,
+        ["Se lee", "Significa"],
+        [
+            ["Validacion de Condiciones - Periodo 2020-2025", "Los seis años, completos y seguidos"],
+            ["Validacion de Condiciones - Periodo 2025", "Solo ese año"],
+            [
+                "Validacion de Condiciones - Periodo 2020, 2022, 2025",
+                "SOLO esos tres años. Los que no aparecen NO se revisaron: no están en el "
+                "archivo y no se reclaman",
+            ],
+        ],
+    )
+    _parrafo(
+        doc,
+        "El guion se usa únicamente cuando los años son consecutivos. Si hay huecos se "
+        "listan todos, porque un rango daría a entender que el año faltante se revisó y no "
+        "tuvo diferencias. El periodo sale de los renglones que contiene el archivo, así "
+        "que siempre describe lo que hay dentro.",
+        italic=True,
+        size=9,
+    )
+    doc.add_paragraph()
+
     # Filtro
     _titulo(doc, "1. Qué renglones entran a la Validación (el filtro)", size=13)
     _parrafo(

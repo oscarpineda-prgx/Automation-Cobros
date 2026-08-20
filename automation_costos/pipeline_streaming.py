@@ -99,12 +99,15 @@ def generar_salida_proveedor_por_anios(
     folio_acc: pd.DataFrame | None = None  # nivel nota de entrada (NE)
     inv_acc: pd.DataFrame | None = None  # nivel factura
     con_datos: list[_Intervalo] = []
+    # Un ResultadoCruce por trimestre; al final se suman para el reporte de metricas.
+    metricas_cruce: list = []
     intervalos = _intervalos_trimestre(start_date, end_date)
 
     # -- PASADA 1: por trimestre -> cruzar y acumular por folio y factura (sin guardar filas) --
     for etiqueta, ini, fin in intervalos:
         log(f"[pasada 1 · {etiqueta}] Compras desde SQL y cruce...")
-        salida = _salida_intervalo(vendor, ini, fin, parquet_root, usar_cpa=usar_cpa)
+        salida = _salida_intervalo(vendor, ini, fin, parquet_root, usar_cpa=usar_cpa,
+                                   metricas=metricas_cruce)
         if salida is None:
             log("                   (sin renglones)")
             continue
@@ -166,6 +169,20 @@ def generar_salida_proveedor_por_anios(
     soportes = (
         copiar_soportes_cpa(rfc, parquet_root, proveedor_dir, log=log) if usar_cpa else []
     )
+
+    # Métricas del cruce: aquí hay un ResultadoCruce por trimestre, así que se suman antes
+    # de anotarlos. Solo la pasada 1 los acumuló, para no contarlos dos veces.
+    if metricas_cruce:
+        from automation_costos.metricas_cruce import fila_desde_varios, registrar
+
+        fila = fila_desde_varios(
+            metricas_cruce,
+            proveedor=str(vendor),
+            nombre=base.split("_", 1)[1] if "_" in base else "",
+            rfc=rfc,
+            periodo=f"{str(start_date)[:4]}-{str(end_date)[:4]}",
+        )
+        registrar(fila, output_dir, log=log)
 
     return ResultadoPipeline(
         rfc=rfc,
@@ -410,12 +427,17 @@ def _intervalos_mes(start_date: str, end_date: str) -> list[tuple[str, str, str]
 
 def _salida_intervalo(
     vendor: str, ini: str, fin: str, parquet_root: Path | str, *,
-    filtro_filas: str = "", usar_cpa: bool = True,
+    filtro_filas: str = "", usar_cpa: bool = True, metricas: list | None = None,
 ) -> tuple[pd.DataFrame, str, str] | None:
     """Trae un intervalo, lo cruza con CPA y lo deja preparado + con valores de fórmula.
 
     Devuelve `(prepared, rfc, base)` o `None` si no trajo renglones. Es determinista:
     llamarlo dos veces (una por pasada) da exactamente el mismo resultado.
+
+    Si se pasa `metricas`, se le agrega el `ResultadoCruce` de este intervalo. Va como
+    acumulador opcional y no como valor de retorno a proposito: esta funcion se llama DOS
+    veces por intervalo (una por pasada), asi que solo la pasada 1 pasa la lista y no se
+    cuentan dos veces las mismas celdas.
     """
     raw = fetch_compras(vendor, ini, fin, filtro_filas=filtro_filas)
     if raw.empty:
@@ -431,7 +453,10 @@ def _salida_intervalo(
     if usar_cpa:
         cpa = cargar_cpa(rfc, parquet_root, barcodes=barcodes, facturas=facturas)
         # en_sitio: sin copias extra (poseemos raw y cpa de este año); es lo que hace caber en RAM.
-        prepared = prepare_compras_dataframe(cruzar(raw, cpa, en_sitio=True).df, en_sitio=True)
+        resultado_cruce = cruzar(raw, cpa, en_sitio=True)
+        if metricas is not None:
+            metricas.append(resultado_cruce)
+        prepared = prepare_compras_dataframe(resultado_cruce.df, en_sitio=True)
         del cpa
     else:
         # Sin cruce: el Compras sale con el EDI que ya traia de origen. Es la ejecucion que

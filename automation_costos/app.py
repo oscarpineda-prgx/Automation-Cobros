@@ -594,6 +594,28 @@ class CostosApp(ctk.CTk):
                 return
             for linea in resultado.resumen().splitlines():
                 self._log(linea)
+
+            # El resumen tambien queda por escrito: antes solo vivia en esta ventana y se
+            # perdia al cerrarla. Se marca como "cruce manual" para distinguirlo de las
+            # ejecuciones que sI produjeron un entregable completo.
+            from automation_costos.metricas_cruce import fila_desde_resultado
+            from automation_costos.metricas_cruce import registrar as registrar_metricas
+            from automation_costos.utils import clean_code
+
+            proveedor = ""
+            nombre = ""
+            if "vndnbr" in resultado.df.columns and resultado.df["vndnbr"].notna().any():
+                proveedor = clean_code(resultado.df["vndnbr"].dropna().iloc[0])
+            if "vndname" in resultado.df.columns and resultado.df["vndname"].notna().any():
+                nombre = str(resultado.df["vndname"].dropna().iloc[0]).strip()
+            registrar_metricas(
+                fila_desde_resultado(
+                    resultado, proveedor=proveedor, nombre=nombre, rfc=rfc,
+                    origen="cruce manual (GUI)",
+                ),
+                log=self._log,
+            )
+
             salida = self._ruta_salida(f"{entrada.stem}_EDI.xlsx")
             resultado.df.to_excel(salida, index=False)
             self._fijar_compras(str(salida))

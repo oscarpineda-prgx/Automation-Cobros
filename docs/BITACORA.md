@@ -12,6 +12,124 @@
 
 <!-- NUEVAS ENTRADAS ARRIBA -->
 
+### 2026-08-19 14:19:33 — [CÓDIGO] reporte_cruce.py acepta --excluir para separar los gigantes
+
+De los 70 proveedores con entregable, solo CUATRO (76034 Pepsico 6.5M, 392811 Sigma 5.8M, 391250 Arca 1.6M, 73692 Celaya 1.1M) se llevan 3.4 de las 3.9 horas estimadas de reconstruccion; los otros 66 juntos son 35 min. Sin una forma de excluirlos habia que pegar 66 numeros a mano en --vendors. Con --excluir se corre primero lo liviano y se deja lo pesado para cuando la maquina este libre. Estimacion calibrada con la prueba real de FRABEL: 522,610 renglones en ~7 min.
+
+**Archivos:** `scripts/reporte_cruce.py`
+
+---
+
+### 2026-08-19 14:13:17 — [CÓDIGO] Las metricas del cruce se guardan solas en cada ejecucion (terminal y GUI)
+
+Peticion de Oscar tras la consulta de Monica: estandarizar que el resumen del cruce quede en un Excel y se actualice solo. Nuevo automation_costos/metricas_cruce.py (dentro del paquete, asi viaja en el .exe): almacen append-only Historico_Cruce_CPA.parquet + Reporte_Cruce_CPA.xlsx derivado, ambos junto a los entregables. Mismo patron que el reporte de diferencias: nunca lanza, y el Excel se escribe a un temporal que se mueve encima para que si esta abierto el bueno quede intacto. Dos hojas: 'Cobertura por proveedor' con la ejecucion MAS RECIENTE de cada uno, e 'Historico de ejecuciones' con todas -asi se ve como sube la cobertura conforme entran mas descargas de CPA-. Las columnas 'Difieren en IVA/IEPS' se ocultan de la hoja principal a proposito: son control tecnico y difieren SIEMPRE que la factura mezcla tasas, leidas sin contexto parecen una alarma. ENGANCHES: (1) pipeline.generar_salida_proveedor, el camino normal; (2) pipeline_streaming para los gigantes, donde hay un ResultadoCruce por trimestre y se suman con fila_desde_varios -el acumulador va como parametro opcional 'metricas' y NO como valor de retorno porque _salida_intervalo se llama dos veces, una por pasada, y contaria doble-; (3) el boton Cruzar de la GUI y (4) el subcomando cpa-cruce, ambos marcados con Origen 'cruce manual' para distinguirlos de una ejecucion con entregable. scripts/reporte_cruce.py ahora tambien alimenta ese mismo historico (una fila por proveedor, Origen 'reconstruido') para que no haya dos archivos con la misma informacion; se puede omitir con --sin-consolidar. Verificado el ciclo completo con resultados simulados: la hoja principal se queda con la ejecucion nueva y no con la vieja, el historico conserva ambas, y la suma de los 3 trimestres del gigante cuadra exacto (240,300 cruzados y 1,500,000 celdas). Todo compila, CLI e imports OK.
+
+**Archivos:** `automation_costos/metricas_cruce.py`, `automation_costos/pipeline.py`, `automation_costos/pipeline_streaming.py`, `automation_costos/app.py`, `main.py`, `scripts/reporte_cruce.py`
+
+---
+
+### 2026-08-19 14:04:01 — [CÓDIGO] Reporte en Excel con las metricas del cruce, tambien para los proveedores ya ejecutados
+
+Peticion de Monica (2026-08-19): el mensaje que la aplicacion muestra al terminar el cruce ('Celdas vacias rellenadas: N') se pierde al cerrar la app, y pregunta si queda guardado por proveedor. Verificado en app.py: _log solo encola el texto para pintarlo en la ventana, no escribe a disco. Nuevo scripts/reporte_cruce.py -> outputs/Reporte_Cruce_CPA.xlsx con dos hojas: Resumen por proveedor y Detalle por proveedor-anio. Lleva las mismas cifras del mensaje (renglones, cruzados por serie y por folio, % de cruce, celdas rellenadas, CFDI en conflicto, discrepancias IVA/IEPS) mas la cobertura EDI antes/despues y los renglones ganados. SIRVE RETROACTIVAMENTE sin abrir los Compras ya generados -son 122 archivos y 20.4 GB de Excel, releerlos tardaria horas-: el cruce se recalcula en memoria desde SQL + Parquet, que es lo que ya hace beneficio_cpa.py, solo que ese DESCARTA el ResultadoCruce y aqui se conserva, que es el objeto con todas las metricas. Es resumible: guarda el avance en CSV despues de cada proveedor. Probado con FRABEL 7112 (522,610 renglones, 6 anios, ~7 min): 364,596 cruzados (69.8%), 2,440,219 celdas rellenadas, cobertura EDI 37.9% -> 70.8% (+32.9 puntos). Pendiente de decidir con Oscar: los proveedores gigantes (Pepsico, Sigma, Arca) pueden tardar horas o no caber en memoria por este camino.
+
+**Archivos:** `scripts/reporte_cruce.py`
+
+---
+
+### 2026-08-18 14:52:14 — [CÓDIGO] Carpeta logica_explicada/ para Data Services y Audit Tools
+
+Peticion de Oscar tras la reunion con Data Services, Audit Tools y Hector: ellos van a REPLICAR la logica en SQL Server y necesitan entenderla, pero los modulos de produccion no se dejan leer por alguien de fuera (nombres tecnicos, comentarios en ingles, optimizaciones que tapan la regla). Nueva carpeta logica_explicada/ con una version DIDACTICA de los cuatro modulos nucleo, mas un README con el orden de lectura, el diagrama del flujo y el vocabulario minimo. Se reescribieron con nombres en español y descriptivos (costo_unitario_facturado en vez de ctonto_edi), comentarios que explican el POR QUE de cada regla, las optimizaciones quitadas (en_sitio, chunks, duckdb) porque estorban para entender, notas 'En SQL Server' con el equivalente aproximado, y ejemplos numericos completos. Se explican los puntos donde es facil equivocarse al replicar: por que 'cruzo' se mide por PRESENCIA y no por valor distinto de cero, por que el total pagado es MAXIMO y no SUMA, por que los impuestos se multiplican en cascada, por que MR8M y KG-14 usan llaves distintas, por que el KG exige XREF3 que empiece en 14, y el reparto en cascada que nunca deja diferencia negativa. NO se toco ningun modulo de produccion: verificado con git, cruce_cpa.py, calculations.py y ajustes_pagos.py sin cambios. Cada archivo declara a que modulo real corresponde y advierte que la fuente de verdad es produccion. Los cuatro compilan. 1,310 lineas en total.
+
+**Archivos:** `logica_explicada/README.md`, `logica_explicada/01_cruce_cpa.py`, `logica_explicada/02_calculo_auditado.py`, `logica_explicada/03_ajustes_pagos.py`, `logica_explicada/04_validacion_condiciones.py`
+
+---
+
+### 2026-08-18 13:44:51 — [DATO] Auditadas las dos guias Word contra el codigo: correctas, con dos huecos que se cerraron
+
+Peticion de Oscar: revisar si Guia_Columnas_Compras.docx y Guia_Validacion_Condiciones.docx siguen al dia con la logica del cruce. Se comparo tabla por tabla contra el codigo, no a ojo. RESULTADO: lo que documentan esta CORRECTO. Verificado exacto: las 8 columnas copiadas del CFDI coinciden con COLUMNAS_COPIADAS de cruce_cpa; factem_edi<-fact_empaq; las 2 calculadas (ctobto_edi, impart_edi) y sus formulas coinciden con _calcular_derivadas; las 2 de control (impiva_edi_formula, imieps_edi_formula) con _validar_importes; las 2 pasadas del cruce (serie+folio principal, solo digitos de respaldo) y las 2 reglas de seguridad; las 10 columnas de auditoria con calculations.py incluida imp_aud = cto_aud x can_rec x (1+iva_aud) x (1+ieps_aud) y la bandera cruzo_cpa. En la Validacion: Consolidado 15/15, Detalle 21/21 y las 6 columnas de ajuste cuadran con el codigo; la unica diferencia de la hoja Ajustes es cosmetica (la guia agrupa 4 columnas en una fila). Tampoco documentan ninguna de las 10 columnas retiradas del Compras el 2026-08-14. HUECOS CERRADOS, los dos en la guia de Compras: (1) no explicaba la ESTRUCTURA del archivo -una hoja por año, la hoja Pendientes_EDI, y que en proveedores grandes se parte en un archivo por año cortando en limites de año mientras la Validacion sigue siendo uno solo-; (2) no mencionaba el periodo en el encabezado. Ambas guias regeneradas. Los PDF siguen siendo del 2026-07-24: se exportan a mano desde Word.
+
+**Archivos:** `scripts/generar_guia_columnas.py`, `scripts/generar_guia_validacion.py`
+
+---
+
+### 2026-08-18 13:36:06 — [CÓDIGO] Documentada la generacion de la Validacion de Condiciones (hueco de documentacion)
+
+Pregunta de Oscar sobre si el cruce y la generacion de la Validacion ya estaban documentados. Auditado: el CRUCE si lo estaba y bien (MAPEO_CRUCE_CPA_COMPRAS.md como especificacion de negocio y CRUCE_IMPLEMENTACION.md como implementacion), pero la VALIDACION no tenia su documento de implementacion equivalente: estaba repartida entre las reglas de LOGICA_NEGOCIO y la guia en Word del auditor, sin un lugar que explicara el codigo. NUEVO docs/VALIDACION_IMPLEMENTACION.md: donde encaja en el pipeline y por que se escribe ANTES que el Compras, las 4 hojas, el filtro de folios que califican (los dos caminos de _has_audit_concepts y por que es prefiltro vectorizado y no bucle), el umbral de 1 peso y que sigue pendiente con negocio, los ajustes MR8M/KG-14 con sus llaves y el corte 3/31/2026, los TRES motores de escritura (openpyxl / rapida / streaming) y cual pinta titulos, el periodo en el titulo, los efectos colaterales al terminar (reporte consolidado y soportes) y el flujo del auditor con validate. Enlazado desde el indice docs/CLAUDE.md. Cifras verificadas contra el codigo, no de memoria: umbral 1.0, 32 columnas fuente, consolidado 15 -> 21 con ajustes, detalle 21, compras 95, PERIODO_FIN 3/31/2026. Ademas se reviso que las guias en Word no documenten las 10 columnas retiradas del Compras el 2026-08-14 (no lo hacen) y se agrego a Guia_Validacion_Condiciones una seccion sobre el periodo en el encabezado, advirtiendo que los años que no aparecen NO se revisaron. Ambas guias regeneradas.
+
+**Archivos:** `docs/VALIDACION_IMPLEMENTACION.md`, `docs/CLAUDE.md`, `scripts/generar_guia_validacion.py`
+
+---
+
+### 2026-08-18 10:22:28 — [CÓDIGO] revisar_cpa resuelve el RFC contra SQL en vez de depender de 5 fijos
+
+Sin esto el plan completo abortaba en seco: revisar_cpa solo conocia los 5 RFC del bloque 1 (RFC_POR_PROVEEDOR) y el plan tiene 246 proveedores con cruce, asi que cualquier tanda nueva moria con 'no se pudo resolver su RFC' antes de ejecutar nada. Ahora los que faltan se resuelven contra SQL en una sola conexion (medido: 1.8 s los dos primeros) buscando cnpj en la base que tenga movimientos del proveedor, y se cachean en rfc_por_proveedor.csv para que las tandas siguientes no vuelvan a pagarlo. Solo se resuelven los del bloque en curso, no los 246. Si SQL no responde, se avisa y la barrera sigue funcionando con lo que haya en cache (no se pierde la proteccion: los que queden sin RFC siguen reportandose como problema). Verificado sobre el primer bloque real de 20: 12 llevan cruce, se resolvieron los 12 y la barrera pasa -todos tienen sus años en el Parquet-, asi que la corrida ya no aborta.
+
+**Archivos:** `scripts/ejecutar_bloque1.py`
+
+---
+
+### 2026-08-18 10:18:07 — [BUG] La deteccion de 'ya entregado' fallaba con los entregables que llevan sufijo de periodo
+
+Hallazgo de Oscar: 3M (80622) aparecia como pendiente aunque ya se habia ejecutado. Causa: ya_hecho reconstruia el nombre exacto del archivo (Validacion_<num>_<nombre>.xlsx) a partir del nombre de la PLANEACION, y fallaba de dos formas verificadas en disco: (1) 3M tiene sus entregables con sufijo de periodo -Validacion_80622_3M MEXICO SA DE CV_2020-2024.xlsx y _2025.xlsx-, ninguno con el nombre exacto esperado; (2) el nombre de la planeacion no siempre coincide con el vndname de SQL con el que se creo la carpeta (acentos, cortes, espacios). Nueva funcion entregados(): escanea UNA vez la carpeta de entregables e indexa por NUMERO de proveedor (regex ^(\d+)_ sobre el nombre de carpeta + glob Validacion_*.xlsx, ignorando los temporales ~$ de Excel). Es inmune al nombre y al sufijo, y cambia cientos de exists() sobre unidad de red por un solo escaneo. Resultado: los detectados pasan de 47 a 48 y el primer bloque ya no arranca en 3M sino en SALMI (64840). Verificado: 51 proveedores con Validacion en disco, 48 estan en el plan y 3 no (885, 19311, 312231, que no tienen accion ejecutable); ninguno de los 20 del bloque tiene carpeta en la ruta de entregables, ni siquiera sin Validacion.
+
+**Archivos:** `scripts/ejecutar_bloque1.py`
+
+---
+
+### 2026-08-18 10:11:15 — [CÓDIGO] Los proveedores ya entregados salen del plan ANTES de cortar el bloque
+
+Hallazgo de Oscar al listar el primer bloque: de los 20 que traia, 5 ya estaban entregados (Pepsico, Nestle, Arca, Celaya, Selecta) y el ejecutor los metia al bloque para omitirlos dentro del bucle. Efecto: un --batch-size 20 rendia 15 proveedores de trabajo real y el --start-index seguia contando huecos, asi que el usuario tenia que adivinar cuanto avanzar. Ahora se filtran antes del corte, en main(): el bloque siempre rinde el batch-size completo de pendientes. La comprobacion es contra el DISCO (existe su Validacion, via ya_hecho), no contra la columna 'entregado' del Excel, que queda vieja en cuanto corre la primera tanda -mismo criterio de la regla 4.4: validar contra la realidad, no contra el archivo-. --rehacer los vuelve a incluir (verificado: con --rehacer reaparecen los 3 primeros). --solo de un proveedor ya entregado ahora dice que esta entregado y sugiere --rehacer, en vez del confuso 'no esta en el plan'. Se conserva el chequeo dentro del bucle como red de seguridad. Verificado con --listar: 47 entregados fuera, bloque 0-19 arranca en 3M (80622) con 20 pendientes reales; el plan del bloque 1 original sigue funcionando (42 de 43 ya entregados, queda 1).
+
+**Archivos:** `scripts/ejecutar_bloque1.py`
+
+---
+
+### 2026-08-18 09:56:53 — [CÓDIGO] El ejecutor corre por bloques: --start-index / --batch-size / --orden
+
+Peticion de Oscar: con 713 proveedores pendientes (~25 h estimadas) no sirve una sola corrida derecho. Misma convencion que cpa-batch-vendors para no tener dos vocabularios: --start-index y --batch-size. Nuevo --orden con dos modos: 'tamano' (el de siempre, chicos primero, DEFAULT para no cambiar el comportamiento del bloque 1) y 'prioridad', que respeta el orden del plan y es el que se quiere por bloques -el bloque 1 deben ser los 20 mas prioritarios, no los 20 mas chicos-. El corte se aplica DESPUES de ordenar, sobre un indice estable 'pos' que se fija con reset_index en cargar_plan, para que el numero sirva igual en la corrida siguiente. Al terminar, el resumen imprime el --start-index de la proxima tanda y cuantos quedan por delante, asi no hay que contar a mano. Bloque vacio (start-index mayor que el plan) aborta con mensaje explicito en vez de correr en silencio. Verificado con --listar, que no ejecuta nada: bloques 0-4 y 5-9 por prioridad, el borde (755 pidiendo 20 y solo quedan 5), el fuera de rango, que sin --batch-size sigue tomando los 760, y que el plan del bloque 1 original y --solo siguen funcionando igual.
+
+**Archivos:** `scripts/ejecutar_bloque1.py`
+
+---
+
+### 2026-08-18 09:17:26 — [CÓDIGO] Plan de ejecucion completo + el periodo ejecutado se anuncia en los titulos
+
+Peticion de Oscar. (1) NUEVO scripts/gen_plan_ejecucion.py -> plan_ejecucion.xlsx: lee la columna accion de la planeacion y define QUE proveedores ejecutar y en que anios. Alcance: 760 proveedores / 1,815 pares prov-anio (1,399 Ejecutar + 416 Descargar/Ejecutar), 42.0M renglones; 246 llevan cruce CPA, 514 sin CPA, 47 ya entregados, 6 por el camino de trimestres. Ordenado por Prioridad_Proveedores_CPA. El volumen sale de reg_compras del propio archivo, sin SQL (760 COUNT tardarian horas). Mismas columnas que consume ejecutar_bloque1 mas prioridad/periodo/con_huecos/entregado. (2) 9 proveedores traen anios SALTEADOS y F_COMPRAS se pide por rango continuo, asi que el anio de en medio -accion 'ninguna': ya terminado o cobertura >=90%- llegaba al entregable y se volveria a reclamar. Decision de Oscar: se recorta. Nuevo parametro anios en pipeline.generar_salida_proveedor y flag --anios en cpa-salida; reusa _mascara_anios, que devuelve None cuando no recorta y asi no copia el DataFrame en los 751 de periodo continuo. ejecutar_bloque1 acepta --plan y agrega --anios solo a los 9 con huecos. (3) Los titulos del Compras y de la Validacion dicen el periodo: consecutivos '2020-2025', con huecos '2020, 2022, 2025', uno solo '2025'. Nuevas utils.formatear_periodo y utils.anios_de_compras; el periodo se deriva de los renglones que QUEDARON (rcvdt), no del rango pedido a SQL, para que el titulo nunca prometa un anio que el archivo no trae. En Compras se calcula sobre el libro completo, no sobre el chunk de la hoja con titulo, que al partir por anios seria solo el primero. La Validacion no lo tenia; ahora sale en las 4 hojas por las dos rutas (openpyxl y xlsxwriter/streaming). write_validation_rapida no pinta titulos, asi que no aplica. Verificado generando libros reales y releyendo la celda del titulo en los 3 casos, la mascara de anios con 5 combinaciones, formatear_periodo con 8, y los comandos que genera el ejecutor para los 9 con huecos y 3 sin huecos.
+
+**Archivos:** `automation_costos/utils.py`, `automation_costos/validation_exporter.py`, `automation_costos/excel_exporter.py`, `automation_costos/pipeline.py`, `main.py`, `scripts/gen_plan_ejecucion.py`, `scripts/ejecutar_bloque1.py`, `docs/LOGICA_NEGOCIO.md`
+
+---
+
+### 2026-08-16 18:48:27 — [DATO] Cierre del objetivo <90% de Monica: 397/398 pares descargados
+
+Lote final del 2026-08-15 (descarga_monica_pendientes.xlsx, 24 proveedores / 44 pares prov-anio): 23 OK, 0 errores, 1 sin valores; 19,596 filas nuevas en 1h 12m (3m 0s por proveedor). Validado contra el PARQUET, no contra el CSV: 43 de 44 pares en el acervo. Acervo general: 475 RFC, 1,208 pares RFC-anio, 87,760,780 conceptos, 10,116,257 CFDI, 1.9 GB. Complemento (solo <90%): 227 RFC, 397 pares, 7,122,851 conceptos, 613,748 CFDI, 140 MB. Ambos inventarios se regeneraron solos al cerrar el lote. El unico par faltante es IGU880227Q96 2023 (INDUSTRIAS GUACAMAYA, 44586), que el portal marca 'Sin valores': no hay CFDI, imposible por CPA Vision, va reportado a Monica junto con los 17 extranjeros sin RFC. Documentado en LOGICA_NEGOCIO 13.1 y actualizado ESTADO_ACTUAL (corte 2026-08-15, comando en PowerShell de una sola linea sin rutas -los defaults de config ya apuntan al acervo-, y como retomar un lote cortado con scripts/complemento_cpa.py + la columna excel_row). Siguiente paso: re-correr actualizar_plan_beneficio.py con el objetivo ya completo.
+
+**Archivos:** `docs/ESTADO_ACTUAL.md`, `docs/LOGICA_NEGOCIO.md`
+
+---
+
+### 2026-08-16 18:44:20 — [BUG] downloaded_after_recovery se contaba como error en los dos resumenes
+
+Hallazgo al revisar el lote de 24 de Monica del 2026-08-15: el resumen dijo 'con error: 2' (DET780215MV1, IEO890214JPA) y Oscar pregunto cuales habian fallado. Ninguno fallo: los dos traen estatus downloaded_after_recovery, es decir tropezaron y el reintento completo la descarga. Validado contra el PARQUET, no contra el CSV: 43 de los 44 pares proveedor-anio del lote quedaron en el acervo (DET 9 filas, IEO 1,593). Es el mismo defecto ya anotado en ESTADO_ACTUAL.md para METRICAS_TOTALES.txt (reportaba 76.5% de exito contando 47 recuperadas como error). Nuevo _ESTATUS_OK = {downloaded, downloaded_after_recovery}, aplicado en _resumen_batch y en actualizar_metricas_totales (donde ademas corrige 'Proveedores unicos OK', que subcontaba). Recalculado el resumen del lote con el CSV real: OK 23, sin valores 1, con error 0. El unico no descargado es IGU880227Q96 2023, que el portal marca 'Sin valores': no tiene CFDI, no es un fallo.
+
+**Archivos:** `automation_costos/cpa_vision.py`
+
+---
+
+### 2026-08-15 14:19:35 — [CÓDIGO] Lote CPA: 'Sin valores' salta al siguiente proveedor en vez de gastar reintentos
+
+Peticion de Oscar tras ver que IGU880227Q96 (primer proveedor del lote de 24 de Monica) terminaba con estatus 'Sin valores' en la pagina de Solicitudes. Ese estatus es un resultado DEFINITIVO del portal -no hay CFDI para ese RFC en el periodo-, pero el codigo lo trataba como cualquier fallo: agotaba los 2 intentos, reiniciaba el navegador y esperaba los max_wait_minutes completos en cada uno. Nueva excepcion SolicitudSinValores + regex _SIN_VALORES; se lanza en _wait_for_request_zip DESPUES de _first_ready_request_link, para que si el portal ya dio link mande el link. En el bucle del lote se captura antes del except generico: estatus propio 'sin_valores', sin reintento, sin reinicio de navegador y sin artefactos de depuracion; vuelve al formulario y sigue con el siguiente. Tampoco detiene el lote con --stop-on-error, porque no pasa por la rama de error. _resumen_batch y actualizar_metricas_totales lo cuentan como categoria aparte para no mandar al auditor a perseguir proveedores que no tienen nada. Verificado: py_compile, la regex contra 10 variantes de texto del estatus, y el resumen con un CSV de metricas de prueba (OK 1, sin valores 1, error 1).
+
+**Archivos:** `automation_costos/cpa_vision.py`
+
+---
+
+### 2026-08-14 12:28:54 — [CÓDIGO] Compras se entrega con 95 columnas (se ocultan 10 intermedias)
+
+Peticion de Oscar con archivo de referencia Compras_9647_FRABEL.xlsm. Se dejan de ESCRIBIR 10 columnas de trabajo: concaten, fante, facdecto, ctouni_sistema, ctontol, impaud, dpagar, imp, 'dif cto fac ctouni', ctontopza. Son restos de cuando el libro llevaba formulas de Excel; hoy cto_aud/imp_aud/debio_pagar_ne ya dicen lo mismo. El recorte es SOLO de escritura (nuevo excel_exporter.COLUMNAS_INTERNAS / COLUMNAS_SALIDA), no del calculo: concaten agrupa las hojas por anio y dpagar alimenta el debio-pagar por folio, quitarlas del calculo romperia el pipeline. Se recorta por posicion en cada renglon y no con df[COLUMNAS_SALIDA] para no copiar millones de renglones en proveedores grandes. Verificado el ciclo completo generar->releer->recalcular->validar con Serral 386029: 54.15, identico al entregable con 105 columnas. Coincide exacto con las 95 columnas del archivo de referencia.
+
+---
+
 ### 2026-08-14 08:10:18 — [CÓDIGO] GUI: descarga sin ventana, boton Detener y rutas/fechas por defecto
 
 Peticion de Oscar. 1) Casilla 'Descargar sin ventana (en segundo plano)' en la tarjeta CPA: pasa headless a CPAVisionSettings (el soporte ya existia, faltaba exponerlo). 2) Boton Detener con cancelacion COOPERATIVA: nuevo automation_costos/cancelacion.py (SenalCancelacion, CancelacionSolicitada, revisar). No se mata el hilo -dejaria Excel a medias y navegadores huerfanos-; la senal se revisa en el bucle de sondeo de _wait_for_request_zip, que es donde la descarga pasa las horas, asi que responde en segundos. El parametro cancelado es OPCIONAL en toda la cadena: sin el, comportamiento identico al anterior. 3) Salida por defecto = config.ENTREGABLES_DIR (X:\...\Proceso Validacion de condiciones) en vez de outputs/: con outputs/ la ETAPA 2 dejaba el paquete del proveedor fuera del acervo y creaba un reporte de diferencias suelto ahi. 4) Fechas por defecto 2020-01-01 a 2026-01-31 como constantes, no calculadas desde hoy. Nuevos widgets ui.casilla y ui.boton_peligro. Verificado construyendo la ventana de verdad. .exe reconstruido.

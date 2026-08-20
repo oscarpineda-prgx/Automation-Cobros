@@ -14,7 +14,15 @@ import config
 from automation_costos.recalculate import read_compras_workbook
 from automation_costos.calculations import prepare_compras_dataframe
 from automation_costos.ajustes_pagos import AJUSTES_COLUMNS, COLUMNAS_AJUSTE, aplicar_ajustes, fetch_pagos_ajustes
-from automation_costos.utils import clean_code, clean_code_series, ensure_parent, make_folio_series, to_number
+from automation_costos.utils import (
+    anios_de_compras,
+    clean_code,
+    clean_code_series,
+    ensure_parent,
+    formatear_periodo,
+    make_folio_series,
+    to_number,
+)
 
 
 # Imagen corporativa: mismos colores/tipografia que el Compras (excel_exporter).
@@ -87,9 +95,9 @@ DETALLE_COLUMNS = [
 ]
 
 
-def write_validation_workbook(compras_path: Path, output_path: Path) -> Path:
+def write_validation_workbook(compras_path: Path, output_path: Path, *, periodo: str = "") -> Path:
     compras_df = prepare_compras_dataframe(read_compras_workbook(compras_path))
-    return write_validation_from_dataframe(compras_df, output_path)
+    return write_validation_from_dataframe(compras_df, output_path, periodo=periodo)
 
 
 # Las únicas columnas del Compras que alimentan la Validación. Copiar solo estas en vez
@@ -105,10 +113,14 @@ _COLUMNAS_FUENTE = [
 ]
 
 
-def write_validation_from_dataframe(compras_df: pd.DataFrame, output_path: Path) -> Path:
+def write_validation_from_dataframe(
+    compras_df: pd.DataFrame, output_path: Path, *, periodo: str = ""
+) -> Path:
     output_path = Path(output_path)
     ensure_parent(output_path)
 
+    # Antes de recortar a `_COLUMNAS_FUENTE`, porque el periodo sale de `rcvdt`.
+    periodo = _periodo_de(compras_df, periodo)
     presentes = [column for column in _COLUMNAS_FUENTE if column in compras_df.columns]
     compras_df = compras_df[presentes].copy()
     compras_df["folio"] = make_folio_series(
@@ -127,11 +139,11 @@ def write_validation_from_dataframe(compras_df: pd.DataFrame, output_path: Path)
     ws_ajustes = wb.create_sheet("Ajustes") if not ajustes.empty else None
     ws_detalle = wb.create_sheet("Detalle PAGOS")
 
-    _write_resumen(resumen, compras_df, consolidated)
-    _write_consolidado(ws_consolidado, compras_df, consolidated, cols_cons)
+    _write_resumen(resumen, compras_df, consolidated, periodo=periodo)
+    _write_consolidado(ws_consolidado, compras_df, consolidated, cols_cons, periodo=periodo)
     if ws_ajustes is not None:
-        _write_ajustes(ws_ajustes, compras_df, ajustes)
-    _write_detalle(ws_detalle, compras_df, detail)
+        _write_ajustes(ws_ajustes, compras_df, ajustes, periodo=periodo)
+    _write_detalle(ws_detalle, compras_df, detail, periodo=periodo)
 
     wb.save(output_path)
     return output_path
@@ -282,10 +294,10 @@ def build_detalle(df: pd.DataFrame, folios: list[str]) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=DETALLE_COLUMNS)
 
 
-def _write_resumen(ws, compras_df: pd.DataFrame, consolidated: pd.DataFrame) -> None:
+def _write_resumen(ws, compras_df: pd.DataFrame, consolidated: pd.DataFrame, *, periodo: str = "") -> None:
     vendor = _vendor_label(compras_df)
     _add_logo(ws)
-    for row, text in ((2, "Tiendas Soriana, S.A. de C.V."), (3, vendor), (4, "Validacion de Condiciones")):
+    for row, text in ((2, "Tiendas Soriana, S.A. de C.V."), (3, vendor), (4, _subtitulo(periodo))):
         ws.merge_cells(start_row=row, start_column=4, end_row=row, end_column=8)
         cell = ws.cell(row, 4, text)
         cell.font = TITLE_FONT
@@ -307,9 +319,10 @@ def _write_resumen(ws, compras_df: pd.DataFrame, consolidated: pd.DataFrame) -> 
 
 
 def _write_consolidado(
-    ws, compras_df: pd.DataFrame, consolidated: pd.DataFrame, columnas: list[str] = CONSOLIDADO_COLUMNS
+    ws, compras_df: pd.DataFrame, consolidated: pd.DataFrame, columnas: list[str] = CONSOLIDADO_COLUMNS,
+    *, periodo: str = "",
 ) -> None:
-    _write_sheet_title(ws, compras_df)
+    _write_sheet_title(ws, compras_df, periodo=periodo)
     # Totales SUBTOTAL sobre las columnas de importe presentes (por nombre, no por posición,
     # para que aguante las columnas extra de ajustes sin desalinearse).
     for offset, nombre in enumerate(columnas):
@@ -328,9 +341,9 @@ def _write_consolidado(
     _format_validation_sheet(ws, start_col=2, num_cols=len(columnas), money_cols=money_cols, date_cols=date_cols)
 
 
-def _write_ajustes(ws, compras_df: pd.DataFrame, ajustes: pd.DataFrame) -> None:
+def _write_ajustes(ws, compras_df: pd.DataFrame, ajustes: pd.DataFrame, *, periodo: str = "") -> None:
     """Hoja "Ajustes": bitácora de las devoluciones (MR8M/KG-14) que anularon diferencias."""
-    _write_sheet_title(ws, compras_df)
+    _write_sheet_title(ws, compras_df, periodo=periodo)
     nota = ws.cell(6, 2, "Devoluciones de pago MR8M / KG-14 (compensadas y pendientes)")
     nota.font = Font(bold=True, italic=True)
     _write_table(ws, ajustes, AJUSTES_COLUMNS, start_row=8, start_col=2)
@@ -342,8 +355,8 @@ def _write_ajustes(ws, compras_df: pd.DataFrame, ajustes: pd.DataFrame) -> None:
     _format_validation_sheet(ws, start_col=2, num_cols=len(AJUSTES_COLUMNS), money_cols=money_cols, date_cols=date_cols)
 
 
-def _write_detalle(ws, compras_df: pd.DataFrame, detail: pd.DataFrame) -> None:
-    _write_sheet_title(ws, compras_df)
+def _write_detalle(ws, compras_df: pd.DataFrame, detail: pd.DataFrame, *, periodo: str = "") -> None:
+    _write_sheet_title(ws, compras_df, periodo=periodo)
     ws["V7"] = "=SUBTOTAL(109,V9:V1048576)"
     ws["V7"].fill = TOTAL_FILL
     ws["V7"].number_format = '#,##0.00'
@@ -351,9 +364,9 @@ def _write_detalle(ws, compras_df: pd.DataFrame, detail: pd.DataFrame) -> None:
     _format_validation_sheet(ws, start_col=2, num_cols=len(DETALLE_COLUMNS), money_cols={15, 16, 21}, date_cols={2, 4}, percent_cols={17, 18, 19, 20})
 
 
-def _write_sheet_title(ws, compras_df: pd.DataFrame) -> None:
+def _write_sheet_title(ws, compras_df: pd.DataFrame, *, periodo: str = "") -> None:
     _add_logo(ws)
-    for row, text in ((2, "Tiendas Soriana, S.A. de C.V."), (3, _vendor_label(compras_df)), (4, "Validacion de Condiciones")):
+    for row, text in ((2, "Tiendas Soriana, S.A. de C.V."), (3, _vendor_label(compras_df)), (4, _subtitulo(periodo))):
         ws.merge_cells(start_row=row, start_column=4, end_row=row, end_column=11)
         cell = ws.cell(row, 4, text)
         cell.font = TITLE_FONT
@@ -417,6 +430,24 @@ def _vendor_label(df: pd.DataFrame) -> str:
     vendor = clean_code(df.iloc[0].get("vndnbr"))
     name = df.iloc[0].get("vndname") or ""
     return f"{vendor} - {name}".strip(" -")
+
+
+def _subtitulo(periodo: str) -> str:
+    """Tercera línea del título: dice qué periodo se ejecutó, no solo qué documento es."""
+    periodo = (periodo or "").strip()
+    return f"Validacion de Condiciones - Periodo {periodo}" if periodo else "Validacion de Condiciones"
+
+
+def _periodo_de(df: pd.DataFrame, periodo: str | None) -> str:
+    """Periodo explícito si quien llama lo sabe; si no, el que digan los propios renglones.
+
+    El pipeline sí lo sabe (son los años que pidió el plan) y lo pasa. En el camino grande el
+    `df` es solo el primer trozo, así que derivarlo de ahí daría un periodo corto: por eso el
+    explícito manda siempre que exista.
+    """
+    if periodo:
+        return periodo
+    return formatear_periodo(anios_de_compras(df))
 
 
 def _num(value) -> float:
@@ -575,13 +606,13 @@ def _formatos_xlsx(wb) -> dict:
     }
 
 
-def _titulo_xlsx(ws, vendor_label: str, fmts: dict) -> None:
+def _titulo_xlsx(ws, vendor_label: str, fmts: dict, periodo: str = "") -> None:
     """Logo + título (filas 2-4), igual que `_write_sheet_title` de la ruta openpyxl."""
     ws.hide_gridlines(2)
     logo = config.RESOURCE_DIR / "templates" / "Soriana-Logo.png"
     if logo.exists():
         ws.insert_image(1, 0, str(logo), {"x_scale": 0.9, "y_scale": 0.9})
-    for fila, texto in ((1, "Tiendas Soriana, S.A. de C.V."), (2, vendor_label), (3, "Validacion de Condiciones")):
+    for fila, texto in ((1, "Tiendas Soriana, S.A. de C.V."), (2, vendor_label), (3, _subtitulo(periodo))):
         ws.merge_range(fila, 3, fila, 10, texto, fmts["titulo"])
 
 
@@ -608,10 +639,10 @@ def _encabezar_xlsx(ws, columnas: list[str], fmts: dict, *, con_totales: bool) -
     ws.autofilter(7, _XLSX_START_COL, 7, _XLSX_START_COL + len(columnas) - 1)
 
 
-def _volcar_xlsx(wb, nombre: str, columnas: list[str], df, vendor_label: str, fmts: dict, *, con_totales: bool) -> None:
+def _volcar_xlsx(wb, nombre: str, columnas: list[str], df, vendor_label: str, fmts: dict, *, con_totales: bool, periodo: str = "") -> None:
     """Vuelca una tabla chica (Consolidado / Ajustes) formateada, empezando en la fila 9."""
     ws = wb.add_worksheet(nombre)
-    _titulo_xlsx(ws, vendor_label, fmts)
+    _titulo_xlsx(ws, vendor_label, fmts, periodo)
     _encabezar_xlsx(ws, columnas, fmts, con_totales=con_totales)
     if df is None or df.empty:
         return
@@ -622,7 +653,7 @@ def _volcar_xlsx(wb, nombre: str, columnas: list[str], df, vendor_label: str, fm
         fila += 1
 
 
-def write_validation_streaming(consolidado_src, detalle_chunks, output_path: Path) -> Path:
+def write_validation_streaming(consolidado_src, detalle_chunks, output_path: Path, *, periodo: str = "") -> Path:
     """Validación de un proveedor gigante con la hoja Detalle COMPLETA, sin agotar memoria.
 
     A diferencia de `write_validation_rapida`, nunca materializa los millones de renglones de
@@ -643,13 +674,16 @@ def write_validation_streaming(consolidado_src, detalle_chunks, output_path: Pat
     consolidated, ajustes, cols_cons = aplicar_ajustes_a_consolidado(consolidado_src, consolidated)
     folios = set(consolidated["Folio"].tolist())
     vendor_label = _vendor_label(consolidado_src)
+    # El `consolidado_src` es folio-nivel y cubre TODO el proveedor, asi que sirve de
+    # respaldo; aun asi manda el periodo explicito cuando quien llama lo conoce.
+    periodo = _periodo_de(consolidado_src, periodo)
 
     wb = xlsxwriter.Workbook(str(output_path), {"constant_memory": True, "use_zip64": True})
     try:
         fmts = _formatos_xlsx(wb)
 
         resumen = wb.add_worksheet("Resumen")
-        _titulo_xlsx(resumen, vendor_label, fmts)
+        _titulo_xlsx(resumen, vendor_label, fmts, periodo)
         dif_col = "Diferencia Ajustada" if "Diferencia Ajustada" in consolidated.columns else "Diferencia"
         total = float(pd.to_numeric(consolidated[dif_col], errors="coerce").fillna(0).sum())
         resumen.set_column(2, 2, 22)
@@ -659,12 +693,12 @@ def write_validation_streaming(consolidado_src, detalle_chunks, output_path: Pat
         resumen.write_number(7, 2, total, fmts["money"])
         resumen.write(7, 3, "Diferencia costos" if not consolidated.empty else "")
 
-        _volcar_xlsx(wb, "Consolidado", cols_cons, consolidated, vendor_label, fmts, con_totales=True)
+        _volcar_xlsx(wb, "Consolidado", cols_cons, consolidated, vendor_label, fmts, con_totales=True, periodo=periodo)
         if not ajustes.empty:
-            _volcar_xlsx(wb, "Ajustes", AJUSTES_COLUMNS, ajustes, vendor_label, fmts, con_totales=False)
+            _volcar_xlsx(wb, "Ajustes", AJUSTES_COLUMNS, ajustes, vendor_label, fmts, con_totales=False, periodo=periodo)
 
         # Detalle en streaming: cada chunk se transforma y se escribe; se libera antes del siguiente.
-        stream = _DetalleStream(wb, DETALLE_COLUMNS, vendor_label, fmts)
+        stream = _DetalleStream(wb, DETALLE_COLUMNS, vendor_label, fmts, periodo)
         for chunk in detalle_chunks:
             det = build_detalle_rapido(chunk, folios)
             stream.escribir(det)
@@ -687,10 +721,11 @@ class _DetalleStream:
     """Escribe la hoja 'Detalle PAGOS' por chunks, formateada, abriendo hojas de continuación
     al llegar al tope de filas de Excel."""
 
-    def __init__(self, wb, columnas: list[str], vendor_label: str, fmts: dict) -> None:
+    def __init__(self, wb, columnas: list[str], vendor_label: str, fmts: dict, periodo: str = "") -> None:
         self.wb = wb
         self.columnas = list(columnas)
         self.vendor_label = vendor_label
+        self.periodo = periodo
         self.fmts = fmts
         self.parte = 0
         self.fila = 0
@@ -700,7 +735,7 @@ class _DetalleStream:
     def _nueva_hoja(self) -> None:
         nombre = "Detalle PAGOS" if self.parte == 0 else f"Detalle PAGOS ({self.parte + 1})"
         self.ws = self.wb.add_worksheet(nombre)
-        _titulo_xlsx(self.ws, self.vendor_label, self.fmts)
+        _titulo_xlsx(self.ws, self.vendor_label, self.fmts, self.periodo)
         _encabezar_xlsx(self.ws, self.columnas, self.fmts, con_totales=True)
         self.fila = 8  # los datos empiezan en la fila 9 (0-indexed 8)
 

@@ -27,7 +27,30 @@ from automation_costos.calculations import (
     build_pending_edi_dataframe,
     prepare_compras_dataframe,
 )
-from automation_costos.utils import ensure_parent
+from automation_costos.utils import anios_de_compras, ensure_parent, formatear_periodo
+
+# Columnas de TRABAJO: se siguen calculando (el pipeline y el agrupado por año dependen de
+# varias) pero NO se escriben en el archivo. Son intermedias del cálculo —restos de cuando
+# el Excel llevaba fórmulas— y para el auditor solo son ruido: `imp_aud`, `debio_pagar_ne`
+# y compañía ya dicen lo mismo en las columnas que sí se entregan.
+#
+# Recortar aquí y no en `COMPRAS_COLUMNS` es deliberado: `concaten` agrupa las hojas por año
+# y `dpagar` alimenta el debió-pagar por folio. Si se dejaran de calcular, se romperían.
+COLUMNAS_INTERNAS = (
+    "concaten",
+    "fante",
+    "facdecto",
+    "ctouni_sistema",
+    "ctontol",
+    "impaud",
+    "dpagar",
+    "imp",
+    "dif cto fac ctouni",
+    "ctontopza",
+)
+
+# Lo que realmente se entrega, en el mismo orden que traía COMPRAS_COLUMNS.
+COLUMNAS_SALIDA = [c for c in COMPRAS_COLUMNS if c not in COLUMNAS_INTERNAS]
 
 HEADER_ROW = 6  # 0-indexed (fila 7 en Excel)
 DATA_ROW = 7  # 0-indexed (fila 8 en Excel)
@@ -182,8 +205,12 @@ def _write_compras_sheets(wb, df, vendor, start_date, end_date) -> None:
     grupo). El reparto de los renglones sin fecha se explica en `_anio_agrupacion`.
     """
     capacidad = SHEET_ROW_LIMIT - DATA_ROW  # filas de datos que caben tras titulo + encabezado
+    # El periodo se calcula UNA vez sobre el libro completo. La hoja con titulo es la primera
+    # (un solo año cuando se parte por años), asi que derivarlo del chunk anunciaria "2020"
+    # en un archivo que lleva 2020-2025.
+    periodo = formatear_periodo(anios_de_compras(df))
     if not len(df):
-        _write_compras_sheet(wb, df, vendor, start_date, end_date, name="Compras", with_title=True)
+        _write_compras_sheet(wb, df, vendor, start_date, end_date, name="Compras", with_title=True, periodo=periodo)
         return
 
     primero = True
@@ -196,7 +223,8 @@ def _write_compras_sheets(wb, df, vendor, start_date, end_date) -> None:
             # 1er pedazo sin sufijo ("Compras 2020"); los siguientes "(2)", "(3)"...
             nombre = base if parte == 0 else f"{base} ({parte + 1})"
             _write_compras_sheet(
-                wb, chunk, vendor, start_date, end_date, name=nombre, with_title=primero
+                wb, chunk, vendor, start_date, end_date, name=nombre, with_title=primero,
+                periodo=periodo,
             )
             primero = False
 
@@ -247,7 +275,7 @@ def _anio_agrupacion(df) -> pd.Series:
 
 
 def _write_compras_sheet(
-    wb, df, vendor, start_date, end_date, *, name="Compras", with_title=True
+    wb, df, vendor, start_date, end_date, *, name="Compras", with_title=True, periodo: str = ""
 ) -> None:
     ws = wb.add_worksheet(name)
     ws.hide_gridlines(2)
@@ -265,19 +293,25 @@ def _write_compras_sheet(
         vendor_code = vendor or _first(df, "vndnbr")
         ws.merge_range(1, 3, 1, 11, "Tiendas Soriana, S.A. de C.V.", title)
         ws.merge_range(2, 3, 2, 11, f"{vendor_code} - {vendor_name}".strip(" -"), title)
-        ws.merge_range(3, 3, 3, 11, f"Compras Periodo {_period_label(start_date, end_date)}", title)
+        # Manda el periodo REAL de los renglones; el rango pedido a SQL es solo respaldo
+        # (puede abarcar años que el plan recorto o que el proveedor no tuvo movimientos).
+        etiqueta = periodo or _period_label(start_date, end_date)
+        ws.merge_range(3, 3, 3, 11, f"Compras Periodo {etiqueta}", title)
 
     # Encabezados de columna (con resaltado EDI/auditoria)
-    for col_idx, column in enumerate(COMPRAS_COLUMNS):
+    for col_idx, column in enumerate(COLUMNAS_SALIDA):
         formato = hdr_edi if column in EDI_COLUMNS else hdr_aud if column in _AUDIT_COLS else hdr
         ws.write(HEADER_ROW, col_idx, column, formato)
         ws.set_column(col_idx, col_idx, _WIDTHS.get(column, 13))
 
-    # Datos como valores, en streaming.
-    _write_rows(ws, df, start_row=DATA_ROW)
+    # Datos como valores, en streaming. Se recorta por POSICION en cada renglon en vez de
+    # hacer `df[COLUMNAS_SALIDA]`: esa seleccion consolidaria bloques y copiaria millones de
+    # renglones en los proveedores grandes, que es justo lo que este camino evita.
+    posiciones = [df.columns.get_loc(c) for c in COLUMNAS_SALIDA if c in df.columns]
+    _write_rows(ws, df, start_row=DATA_ROW, posiciones=posiciones)
 
     if len(df):
-        ws.autofilter(HEADER_ROW, 0, HEADER_ROW + len(df), len(COMPRAS_COLUMNS) - 1)
+        ws.autofilter(HEADER_ROW, 0, HEADER_ROW + len(df), len(COLUMNAS_SALIDA) - 1)
 
 
 def _write_pending_sheet(wb, pending) -> None:
@@ -312,10 +346,17 @@ def _write_pending_sheet(wb, pending) -> None:
     ws.autofilter(2, 0, 2 + len(pending), len(pending.columns) - 1)
 
 
-def _write_rows(ws, df: pd.DataFrame, *, start_row: int) -> None:
-    """Escribe los valores del DataFrame fila por fila, saneando NaN a celda vacía."""
+def _write_rows(
+    ws, df: pd.DataFrame, *, start_row: int, posiciones: list[int] | None = None
+) -> None:
+    """Escribe los valores del DataFrame fila por fila, saneando NaN a celda vacía.
+
+    Con `posiciones` se escriben solo esas columnas (por índice), sin materializar una
+    proyección del DataFrame.
+    """
     for offset, row in enumerate(df.itertuples(index=False, name=None)):
-        ws.write_row(start_row + offset, 0, [_clean(v) for v in row])
+        datos = row if posiciones is None else [row[i] for i in posiciones]
+        ws.write_row(start_row + offset, 0, [_clean(v) for v in datos])
 
 
 def _clean(value):

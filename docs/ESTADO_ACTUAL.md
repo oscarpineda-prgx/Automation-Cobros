@@ -1,9 +1,13 @@
 # Estado actual del proyecto
 
-> **Última actualización:** 2026-08-11
+> **Última actualización:** 2026-08-15
 > Actualizar este archivo al cerrar cada sesión de trabajo.
 
 ---
+
+> ✅ **CERRADO (2026-08-15): el objetivo de cobertura <90 % de Mónica está descargado.**
+> **397 de 398** pares proveedor-año. El único que falta es imposible por CPA Vision
+> (ver *El caso IGU880227Q96* abajo). Ya no hay lotes de descarga pendientes.
 
 > ✅ **CERRADO (2026-08-11): renombre Cobros → Costos completo.** La carpeta raíz ya es
 > `Automation-Costos` y el checklist de validación de [BITACORA.md](BITACORA.md) pasó entero
@@ -17,30 +21,58 @@
 
 # 🎯 Dónde vamos ahora mismo
 
-**Descargando de CPA Vision el objetivo de cobertura <90% de Mónica** (correo 2026-08-10,
-[reunión 009](reuniones/009-2026-08-10-enfoque-cobertura-90-monica.md)). Ya no se descarga
-"todo el historial por prioridad": solo **proveedor+año con `% poblado EDI` < 90 %**.
+**La descarga terminó.** El objetivo de cobertura <90 % de Mónica (correo 2026-08-10,
+[reunión 009](reuniones/009-2026-08-10-enfoque-cobertura-90-monica.md)) quedó cubierto.
+El criterio nunca fue "todo el historial por prioridad": solo **proveedor+año con
+`% poblado EDI` < 90 %**. El siguiente paso ya no es bajar datos, es **explotarlos**
+(ver *Siguiente paso inmediato*).
 
-## 📊 Corte al 2026-08-11 (medido contra el parquet, no contra CSV)
+## 📊 Corte al 2026-08-15 (medido contra el parquet, no contra CSV)
 
 | Concepto | Valor |
 |---|---:|
-| Objetivo (`acción = Descargar/Ejecutar`) | **416** filas prov-año / **246** proveedores |
-| Ya cubiertas en parquet | **167** filas · 109 proveedores completos |
+| Objetivo <90 % (`_objetivo_edi_menor_90.csv`) | **398** pares prov-año / **227** RFC |
+| Ya en el acervo | **397** ✅ |
+| **Faltan** | **1** — IGU880227Q96 2023, sin CFDI (ver abajo) |
 | 🌎 Extranjeros sin RFC (imposible por CPA) | **17** proveedores |
-| **Faltan** | **232** filas / **120** proveedores |
 
-Faltantes por año: 2020→30 · 2021→44 · 2022→45 · 2023→41 · 2024→9 · 2025→63.
-(El 2026-08-10 en la mañana eran 104 cubiertas / 295 faltantes / 159 proveedores.)
+Último lote (2026-08-15, `descarga_monica_pendientes.xlsx`, 24 proveedores / 44 pares):
+**23 OK, 0 errores, 1 sin valores**, 19,596 filas nuevas en 1h 12m (3m 0s por proveedor).
 
-**Acervo total en `outputs/cpa_vision/parquet`:** 350 RFC (337 con datos), **809** pares
-RFC-año, **86,978,317** conceptos, **9,788,880** CFDI, 1.9 GB de Parquet (4.9 GB con los ZIP).
-Inventario detallado: `Inventario_CPA_Vision.xlsx`.
+### Las dos carpetas del acervo
 
-**Tiempos** (22 archivos `cpa_batch_metrics_*.csv`, 378 intentos): mediana **3m 43s** por
-proveedor, media **9m 32s**, p90 **17m**; 190.3 h de reloj acumuladas. Éxito real **336/378
-= 88.9 %** (⚠️ `METRICAS_TOTALES.txt` reporta 76.5 % porque cuenta los 47
-`downloaded_after_recovery` como error, siendo descargas buenas).
+| | RFC | Pares RFC-año | Conceptos | CFDI | Parquet |
+|---|---:|---:|---:|---:|---:|
+| `cpa_vision` (todo lo descargado) | **475** | 1,208 | 87,760,780 | 10,116,257 | 1.9 GB |
+| `cpa_vision_complemento` (solo <90 %) | **227** | 397 | 7,122,851 | 613,748 | 140 MB |
+
+Cada una lleva su propio `Inventario_CPA_Vision.xlsx`, y **ambas se actualizan solas al
+cerrar cada lote** de descarga (`inventario_cpa` + `complemento_cpa`, procesos independientes
+enganchados en `cpa_vision.py`). El complemento se llena **por copia** desde el general,
+filtrando por `_objetivo_edi_menor_90.csv`: no se descarga dos veces.
+
+> ⚠️ Por eso el lote **debe** correr con el `--download-dir` del acervo (es el default de
+> `config`). Si se le pasa `outputs/cpa_vision`, los ZIP y el Parquet quedan dentro del repo
+> y el acervo y su inventario quedan incompletos.
+
+**Tiempos acumulados** (29 archivos `cpa_batch_metrics_*.csv`, 530 intentos): 212.6 h de
+reloj, media **7m 52s** por proveedor, **407** proveedores únicos OK, 8,984,523 filas.
+
+### El caso IGU880227Q96 — reportar a Mónica
+
+**INDUSTRIAS GUACAMAYA SA DE CV (44586), año 2023.** CPA Vision procesa la solicitud y
+devuelve estatus **"Sin valores"**: no existe ni un CFDI de ese RFC recibido por Soriana en
+2023. **No es un fallo técnico y no se arregla reintentando** — se verificó dos veces
+(2026-08-14 y 2026-08-15). Va en la misma canasta que los 17 extranjeros sin RFC: un
+proveedor-año del objetivo que CPA Vision no puede cubrir porque no hay comprobantes.
+
+Desde el 2026-08-15 el lote **detecta ese estatus y salta al siguiente proveedor** en vez de
+gastar los 2 intentos y los `max_wait_minutes` completos (`SolicitudSinValores`). Aparece en
+el resumen como *"Sin valores (saltados)"*, aparte de los errores.
+
+> ⚠️ **`downloaded_after_recovery` es una descarga BUENA** (tropezó y el reintento la
+> completó). Hasta el 2026-08-15 los dos resúmenes la contaban como error — por eso
+> `METRICAS_TOTALES.txt` reportaba 76.5 % de éxito. Corregido con `_ESTATUS_OK`.
 
 ## 📈 Indicador de beneficio por año (pedido de Mónica)
 
@@ -118,16 +150,30 @@ El maestro es **`descarga_monica_pendientes.xlsx`** (lo genera `scripts/gen_lote
 una fila por proveedor, `FECHAS` = los años sueltos <90 %, ordenado por prioridad,
 excluyendo lo que ya está en parquet). Se pagina con `--start-index`:
 
-```bash
-.venv/Scripts/python.exe main.py cpa-batch-vendors --input descarga_monica_pendientes.xlsx \
-    --start-index 0 --batch-size 50 \
-    --user <USUARIO_CPA> --password <PASSWORD_CPA> \
-    --download-dir outputs/cpa_vision --parquet-dir outputs/cpa_vision/parquet \
-    --browser-channel msedge
+**No se le pasan rutas**: `--download-dir` y `--parquet-dir` traen `default=None` y caen en
+`config`, que ya apunta al acervo. Escribirlas a mano es la forma de equivocarse.
+
+```powershell
+.\.venv\Scripts\python.exe main.py cpa-batch-vendors --input descarga_monica_pendientes.xlsx --start-index 0 --batch-size 50 --user '<USUARIO_CPA>' --password '<PASSWORD_CPA>' --browser-channel msedge
 ```
+
+> ⚠️ **La terminal del proyecto es PowerShell.** Va todo en **una sola línea**: `\` no
+> continúa línea en PowerShell (el carácter es el backtick `` ` ``). Comillas **simples** en
+> la contraseña: las dobles interpolan `$`.
 
 > ⚠️ **No regenerar el maestro a media paginación**: `gen_lote_monica.py` reordena y
 > reindexa el archivo, y `--start-index` dejaría de apuntar a donde iba.
+
+**Si un lote se corta a media corrida** (reinicio, corte de energía): los ZIP y el Parquet ya
+descargados **sí** quedan en el acervo, pero el inventario y el complemento **no**, porque su
+enganche corre al *cerrar* el lote. Se ponen al día sin re-descargar nada:
+
+```powershell
+.\.venv\Scripts\python.exe scripts/complemento_cpa.py
+```
+
+Para saber dónde retomar, el `cpa_batch_metrics_*.csv` del lote trae la columna `excel_row`:
+el `--start-index` es esa fila **menos 2**.
 
 > El criterio anterior (59 prioritarios del master, col X) quedó **superado** por el enfoque
 > <90 %. Los lotes `descarga_prioritarios_lote*.xlsx` se borraron el 2026-08-10.
@@ -227,12 +273,12 @@ en `ATL20AF2222SQ19` con Trusted_Connection. **Toda la lógica de joins vive en 
 
 ## Etapa B — Extracción masiva de CFDI desde CPA Vision
 
-**Estado: 350 RFC descargados; faltan 120 proveedores del objetivo <90 %.** Playwright +
+**Estado: TERMINADA. 475 RFC descargados; el objetivo <90 % quedó en 397/398.** Playwright +
 msedge contra `cpavision.mx`.
 
-- Dataset en `outputs/cpa_vision/parquet`, particionado Hive `rfc=/year=/request_id=`,
+- Dataset en `<acervo>/cpa_vision/parquet`, particionado Hive `rfc=/year=/request_id=`,
   consultable con DuckDB. **Es la fuente de verdad del avance** (los CSV mienten).
-- Tiempos medidos: mediana 3m 43s, media 9m 32s, p90 17m por proveedor (ver el corte arriba).
+- Tiempos medidos: media 7m 52s por proveedor sobre 530 intentos (ver el corte arriba).
 
 ### Problemas abiertos de la Etapa B
 
@@ -266,10 +312,12 @@ dejarlo y que el auditor filtre. No se cambió nada por cuenta propia.
 
 ## Siguiente paso inmediato
 
-- [ ] Descargar los **120 proveedores / 232 filas prov-año** que faltan del objetivo <90 %
-      (paginar `descarga_monica_pendientes.xlsx` con `--start-index`)
-- [ ] Re-correr `actualizar_plan_beneficio.py` conforme entren descargas, para que el
-      archivo ACTUALIZADO de Mónica refleje el beneficio real
+- [x] ~~Descargar el objetivo <90 %~~ — **cerrado el 2026-08-15**, 397/398
+- [ ] **Re-correr `actualizar_plan_beneficio.py`** ahora que el objetivo está completo, para
+      que el archivo ACTUALIZADO de Mónica refleje el beneficio real de los 23 proveedores
+      nuevos. Es el pendiente más inmediato
+- [ ] Reportar a Mónica **IGU880227Q96 / 44586 año 2023**: sin CFDI en CPA Vision, no se
+      puede cubrir (junto con los 17 extranjeros)
 - [ ] Fase 3: copiar el parquet a la carpeta de Data Services
       `...\Proceso Validación de condiciones (Oscar Pineda)\cpa_vision`
 - [ ] Confirmar con Mónica el caso **2020 de Selecta** (CFDIs bajados que no cruzan por

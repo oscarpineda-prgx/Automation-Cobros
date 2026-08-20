@@ -116,6 +116,39 @@ def make_folio_series(tienda: pd.Series, nota_entrada: pd.Series) -> pd.Series:
     return config.FOLIO_PREFIX + tienda_text + nota_text
 
 
+def formatear_periodo(anios) -> str:
+    """Etiqueta del periodo ejecutado: "2020-2025", "2025" o "2020, 2022, 2025".
+
+    La planeación pide años sueltos por proveedor y el auditor necesita ver en el propio
+    archivo cuáles se auditaron: un "2020-2025" en un entregable al que le falta 2022 se lee
+    como que ese año no tuvo diferencias, cuando en realidad ni se revisó.
+
+    Se usa el guion SOLO cuando los años son consecutivos, sin huecos. Con huecos se listan
+    todos separados por coma, aunque quede largo: es preferible a mentir con un rango.
+    """
+    limpios = sorted({int(a) for a in anios if str(a).strip() not in ("", "None", "nan")})
+    if not limpios:
+        return ""
+    if len(limpios) == 1:
+        return str(limpios[0])
+    if limpios == list(range(limpios[0], limpios[-1] + 1)):
+        return f"{limpios[0]}-{limpios[-1]}"
+    return ", ".join(str(a) for a in limpios)
+
+
+def anios_de_compras(df: pd.DataFrame, columna: str = "rcvdt") -> list[int]:
+    """Años REALMENTE presentes en los renglones, tomados de la fecha de recibo.
+
+    El título se deriva de los datos y no del periodo pedido a propósito: así siempre
+    describe lo que el archivo contiene, incluso si el rango de SQL traía más años o si el
+    filtro del plan recortó alguno. El año se define por `rcvdt` (LOGICA_NEGOCIO §13).
+    """
+    if df is None or df.empty or columna not in df.columns:
+        return []
+    fechas = pd.to_datetime(df[columna], errors="coerce")
+    return sorted(int(a) for a in fechas.dt.year.dropna().unique())
+
+
 def safe_filename(text: str) -> str:
     cleaned = re.sub(r'[<>:"/\\|?*]+', "_", text)
     cleaned = re.sub(r"\s+", " ", cleaned).strip()

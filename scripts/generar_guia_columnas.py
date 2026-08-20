@@ -91,6 +91,45 @@ def main() -> None:
         r.font.size = Pt(10)
     doc.add_paragraph()
 
+    # 0. Como esta organizado el archivo que abre el auditor.
+    _titulo(doc, "Cómo está organizado el archivo", size=13)
+    _tabla(
+        doc,
+        ["Hoja", "Qué contiene"],
+        [
+            [
+                "Compras 2020, Compras 2021, ...",
+                "Una hoja por año, según la fecha de recibo. Si un año pasa el tope de filas "
+                "de Excel se continúa en 'Compras 2020 (2)': nunca se trunca en silencio",
+            ],
+            [
+                "Pendientes_EDI",
+                "Los renglones que quedaron con campos EDI vacíos, para completar a mano o "
+                "con una descarga de CPA Vision. Si no hay, lo dice explícitamente",
+            ],
+        ],
+    )
+    _parrafo_9(
+        doc,
+        "En proveedores muy grandes el Compras se parte en un archivo por año "
+        "(Compras_<proveedor>_2020.xlsx, _2021.xlsx...), cada uno con su propio "
+        "Pendientes_EDI. El corte se hace en límites de año, así que una nota de entrada "
+        "nunca queda partida entre dos archivos y ningún cálculo cambia. La Validación, en "
+        "cambio, es SIEMPRE un solo archivo.",
+        italic=True,
+    )
+    doc.add_paragraph()
+
+    _titulo(doc, "El periodo auditado va en el encabezado", size=13)
+    _parrafo_9(
+        doc,
+        "Bajo el nombre del proveedor, cada archivo dice qué periodo contiene: "
+        "'Compras Periodo 2020-2025' si los años son seguidos, o 'Compras Periodo "
+        "2020, 2022, 2025' si la planeación pidió años sueltos. El guion se usa solo cuando "
+        "no hay huecos: los años que no aparecen NO se revisaron y no están en el archivo.",
+    )
+    doc.add_paragraph()
+
     # 1. Llave del cruce
     _titulo(doc, "1. Llave del cruce (cómo se emparejan Compras y CPA Vision)", size=13)
     _tabla(

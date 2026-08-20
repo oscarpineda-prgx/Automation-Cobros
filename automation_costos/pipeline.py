@@ -40,7 +40,13 @@ from automation_costos.cruce_cpa import (
 )
 from automation_costos.database import contar_compras, fetch_compras
 from automation_costos.excel_exporter import write_compras_files
-from automation_costos.utils import clean_code, safe_filename, to_number
+from automation_costos.utils import (
+    anios_de_compras,
+    clean_code,
+    formatear_periodo,
+    safe_filename,
+    to_number,
+)
 from automation_costos.validation_exporter import write_validation_from_dataframe
 
 # Subcarpeta, dentro de la del proveedor, donde se dejan los ZIP de CPA Vision que
@@ -86,6 +92,7 @@ def generar_salida_proveedor(
     log: Callable[[str], None] = print,
     usar_cpa: bool = True,
     anios_cruce: set[int] | None = None,
+    anios: set[int] | None = None,
 ) -> ResultadoPipeline:
     """Genera la salida de un proveedor eligiendo el camino según su tamaño.
 
@@ -110,7 +117,7 @@ def generar_salida_proveedor(
     else:
         resultado = _generar_salida_en_memoria(
             vendor, start_date, end_date, parquet_root, output_dir, log=log,
-            usar_cpa=usar_cpa, anios_cruce=anios_cruce,
+            usar_cpa=usar_cpa, anios_cruce=anios_cruce, anios=anios,
         )
     actualizar_reporte_consolidado(output_dir, log=log)
     return resultado
@@ -156,6 +163,7 @@ def _generar_salida_en_memoria(
     log: Callable[[str], None] = print,
     usar_cpa: bool = True,
     anios_cruce: set[int] | None = None,
+    anios: set[int] | None = None,
 ) -> ResultadoPipeline:
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -166,6 +174,21 @@ def _generar_salida_en_memoria(
         raise ValueError(f"El proveedor {vendor} no devolvió compras en ese periodo.")
     rfc = rfc_de_compras(raw)
     log(f"      {len(raw):,} renglones · RFC {rfc}")
+
+    # Recorte a los años que pidió la planeación. F_COMPRAS se consulta por un rango
+    # continuo (del primer al último año pedido), así que cuando el plan trae huecos —p. ej.
+    # 2020, 2021, 2023, 2024, 2025— SQL devuelve tambien el año de en medio. Ese año tiene
+    # accion "ninguna": ya está terminado o su cobertura EDI es >= 90%, y colarlo en el
+    # entregable haría que se reclame de nuevo algo ya cerrado.
+    recorte = _mascara_anios(raw, anios)
+    if recorte is not None:
+        log(f"      Recorte a los años {sorted(anios)}: "
+            f"{int(recorte.sum()):,} de {len(raw):,} renglones se conservan.")
+        raw = raw.loc[recorte].copy()
+        if raw.empty:
+            raise ValueError(
+                f"El proveedor {vendor} no tiene renglones en los años {sorted(anios)}."
+            )
 
     cruce = None
     cpa = None
@@ -247,9 +270,30 @@ def _generar_salida_en_memoria(
     # La Validación va PRIMERO: es el entregable real y es chica. Así sale aunque el
     # Compras gigante falle, y trabaja sobre el DataFrame antes de que el exportador le
     # aplique los valores de fórmula en sitio.
-    log("[3/4] Generando la Validación de Condiciones...")
-    write_validation_from_dataframe(prepared, validacion_path)
+    # El periodo sale de los renglones que quedaron, no del rango pedido a SQL: asi el
+    # titulo del entregable dice exactamente que años contiene.
+    periodo = formatear_periodo(anios_de_compras(prepared))
+    log(f"[3/4] Generando la Validación de Condiciones (periodo {periodo})...")
+    write_validation_from_dataframe(prepared, validacion_path, periodo=periodo)
     log(f"      {validacion_path}")
+
+    # Las métricas del cruce quedan por escrito. Antes solo se imprimían en pantalla y se
+    # perdían al cerrar la aplicación, así que no había forma de saber después con cuánta
+    # cobertura se generó un entregable (lo preguntó Mónica el 2026-08-19). No lanza.
+    if cruce is not None:
+        from automation_costos.metricas_cruce import fila_desde_resultado, registrar
+
+        registrar(
+            fila_desde_resultado(
+                cruce,
+                proveedor=clean_code(vendor),
+                nombre=base.split("_", 1)[1] if "_" in base else "",
+                rfc=rfc,
+                periodo=periodo,
+            ),
+            output_dir,
+            log=log,
+        )
 
     log("[4/4] Generando el Compras (esto puede tardar en proveedores grandes)...")
     compras_paths = write_compras_files(

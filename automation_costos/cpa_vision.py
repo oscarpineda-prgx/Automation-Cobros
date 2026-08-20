@@ -85,6 +85,20 @@ class CPAVisionBatchJob:
     years: tuple[int, ...]
 
 
+# El portal marca "Sin valores" en la columna Estatus cuando termino de procesar la solicitud
+# y no encontro un solo CFDI para ese RFC en ese periodo. Es un resultado DEFINITIVO, no un
+# fallo: reintentar o esperar mas no cambia nada, y hasta hoy el lote se gastaba los dos
+# intentos y los `max_wait_minutes` completos en cada uno de esos proveedores.
+_SIN_VALORES = re.compile(r"sin\s+valores", re.IGNORECASE)
+
+# Estatus de metrica que significan "el ZIP se descargo y quedo en el Parquet".
+_ESTATUS_OK = {"downloaded", "downloaded_after_recovery"}
+
+
+class SolicitudSinValores(RuntimeError):
+    """La solicitud termino sin ningun CFDI. Se salta el proveedor y se sigue con el lote."""
+
+
 def run_manual_session(settings: CPAVisionSettings | None = None) -> list[Path]:
     """Open CPA Vision and let the user navigate/download files manually.
 
@@ -427,6 +441,18 @@ def request_vendor_master_batch(
                         _return_to_downloads_form(page, settings.timeout_ms)
                         status = "downloaded_after_recovery" if recovered else "downloaded"
                         error = ""
+                        break
+                    except SolicitudSinValores as exc:
+                        # Resultado definitivo del portal, no un error: no se reintenta, no se
+                        # reinicia el navegador y no se guardan artefactos de depuracion. Se
+                        # deja la metrica con estatus propio y se pasa al siguiente proveedor.
+                        status = "sin_valores"
+                        error = str(exc)
+                        _log_step(f"{job.rfc}: sin valores en el portal. Se salta al siguiente proveedor.")
+                        try:
+                            _return_to_downloads_form(page, settings.timeout_ms)
+                        except Exception as vuelta_exc:  # noqa: BLE001
+                            _log_step(f"No se pudo volver al formulario tras 'sin valores': {vuelta_exc}")
                         break
                     except Exception as exc:
                         error = str(exc)
@@ -1645,6 +1671,14 @@ def _wait_for_request_zip(
         if status:
             _log_step(f"Solicitud {request_id} aun sin link. Estado actual: {status}")
 
+        # Se revisa DESPUES de `_first_ready_request_link`: si el portal ya dio link, manda el
+        # link. Solo cuando no hay nada que descargar y el estatus dice "Sin valores" se corta.
+        if _SIN_VALORES.search(status or ""):
+            raise SolicitudSinValores(
+                f"La solicitud {request_id} termino con estatus '{status.strip()}': "
+                "no hay CFDI para ese RFC en el periodo pedido."
+            )
+
         if time.monotonic() >= deadline:
             raise TimeoutError(
                 f"La solicitud {request_id} no estuvo lista en {max_wait_minutes} minutos."
@@ -1729,8 +1763,14 @@ def _resumen_batch(metrics_path: Path) -> None:
             return float(x)
         except (TypeError, ValueError):
             return 0.0
-    ok = [r for r in filas if r.get("status") == "downloaded"]
-    err = [r for r in filas if r.get("status") != "downloaded"]
+    # `downloaded_after_recovery` es una descarga BUENA: el proveedor tropezo (sesion caida,
+    # solicitud perdida) y el reintento la completo. Contarla como error mandaba a revisar
+    # proveedores que ya estaban en el Parquet.
+    ok = [r for r in filas if r.get("status") in _ESTATUS_OK]
+    # "sin valores" tampoco es un fallo que haya que revisar: el portal confirmo que ese RFC
+    # no tiene CFDI en el periodo. Se cuenta aparte para no mandar al auditor a perseguirlo.
+    sin_valores = [r for r in filas if r.get("status") == "sin_valores"]
+    err = [r for r in filas if r.get("status") not in _ESTATUS_OK | {"sin_valores"}]
     total_seg = sum(_num(r.get("elapsed_seconds")) for r in filas)
     total_filas = sum(int(_num(r.get("parquet_rows"))) for r in filas)
     prom = total_seg / len(filas) if filas else 0.0
@@ -1743,6 +1783,12 @@ def _resumen_batch(metrics_path: Path) -> None:
     print(f"  Tiempo total           : {_fmt(total_seg)}  ({total_seg:,.0f} s)", flush=True)
     print(f"  Promedio por proveedor : {_fmt(prom)}", flush=True)
     print(f"  Filas descargadas      : {total_filas:,}", flush=True)
+    if sin_valores:
+        print(
+            f"  Sin valores (saltados) : {len(sin_valores)} -> "
+            f"{', '.join(r.get('rfc','?') for r in sin_valores)}",
+            flush=True,
+        )
     if err:
         print(f"  Con error (revisar)    : {', '.join(r.get('rfc','?') for r in err)}", flush=True)
     print("================================================================", flush=True)
@@ -2289,8 +2335,9 @@ def actualizar_metricas_totales(download_dir: Path) -> Path:
         m, s = divmod(resto, 60)
         return f"{h}h {m}m {s}s"
 
-    ok = [r for r in filas if r.get("status") == "downloaded"]
-    err = [r for r in filas if r.get("status") != "downloaded"]
+    ok = [r for r in filas if r.get("status") in _ESTATUS_OK]
+    sin_valores = [r for r in filas if r.get("status") == "sin_valores"]
+    err = [r for r in filas if r.get("status") not in _ESTATUS_OK | {"sin_valores"}]
     unicos = {r.get("rfc"): r for r in ok}
     total_seg = sum(_num(r.get("elapsed_seconds")) for r in filas)
     seg_u = sum(_num(r.get("elapsed_seconds")) for r in unicos.values())
@@ -2310,7 +2357,7 @@ def actualizar_metricas_totales(download_dir: Path) -> Path:
         "METRICA TOTAL DE DESCARGAS (CPA Vision)",
         f"Actualizado          : {datetime.now():%Y-%m-%d %H:%M:%S}",
         f"Archivos de metricas : {len(archivos)}",
-        f"Intentos totales     : {len(filas)}  (OK: {len(ok)} | error: {len(err)})",
+        f"Intentos totales     : {len(filas)}  (OK: {len(ok)} | sin valores: {len(sin_valores)} | error: {len(err)})",
         f"Proveedores unicos OK: {len(unicos)}",
         f"Tiempo total (todo)  : {_fmt(total_seg)}  ({total_seg:,.0f} s)",
         f"Promedio x proveedor : {_fmt(prom)}",

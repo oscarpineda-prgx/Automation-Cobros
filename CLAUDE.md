@@ -37,6 +37,7 @@ Lee estos archivos en este orden para ponerte al día:
 | [docs/LOGICA_NEGOCIO.md](docs/LOGICA_NEGOCIO.md) | Reglas de negocio, definiciones de columnas, criterios de auditoría. **La fuente de verdad.** |
 | [docs/MAPEO_CRUCE_CPA_COMPRAS.md](docs/MAPEO_CRUCE_CPA_COMPRAS.md) | 🔑 **Qué columna de CPA Vision llena qué columna de compras, y con qué fórmula.** Especificación del cruce. |
 | [docs/CRUCE_IMPLEMENTACION.md](docs/CRUCE_IMPLEMENTACION.md) | Cómo quedó construido el cruce: arquitectura, estrategia de llaves, métricas y pruebas. |
+| [docs/VALIDACION_IMPLEMENTACION.md](docs/VALIDACION_IMPLEMENTACION.md) | 🔑 **Cómo se genera la Validación de Condiciones**: las 4 hojas, el filtro de folios, los ajustes MR8M/KG-14 y los tres motores de escritura. |
 | [docs/GUI.md](docs/GUI.md) | Interfaz gráfica: lenguaje visual PRGX, estructura, concurrencia y build del .exe/.zip. |
 | [docs/PLANEACION.md](docs/PLANEACION.md) | Qué proveedores se trabajan, en qué orden y periodo. Master 2026 y los 6 urgentes. |
 | [docs/reuniones/README.md](docs/reuniones/README.md) | Índice de reuniones con el cliente/equipo, una nota por reunión |

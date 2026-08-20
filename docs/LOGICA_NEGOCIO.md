@@ -467,6 +467,96 @@ prioridad". Se descarga **solo proveedor+año con cobertura EDI < 90%**, según 
 
 Detalle en [reuniones/009-2026-08-10-enfoque-cobertura-90-monica.md](reuniones/009-2026-08-10-enfoque-cobertura-90-monica.md).
 
+**Cierre del objetivo (2026-08-15).** 397 de 398 pares proveedor-año descargados. El único
+que no se pudo es un caso de la regla de abajo, no un pendiente de trabajo.
+
+---
+
+## 13.2 Qué se EJECUTA y en qué años (2026-08-18)
+
+La misma columna `accion` de la planeación define las dos mitades del trabajo. Descargar ya
+terminó; lo que queda es **ejecutar**:
+
+| `accion` | Qué significa | ¿Cruce CPA? |
+|---|---|---|
+| **Descargar/Ejecutar** | había que bajar la CPA de ese año (ya se hizo) **y ejecutar** | **SÍ** |
+| **Ejecutar** | ejecutar con el EDI que el Compras ya trae de origen | NO |
+| `ninguna` | no se toca: ya terminado, o cobertura EDI ≥ 90 % | — |
+
+**El alcance a ejecutar (corte 2026-08-18): 760 proveedores · 1,815 pares proveedor-año**
+(1,399 `Ejecutar` + 416 `Descargar/Ejecutar`), 42.0 M de renglones. De ellos **246 llevan
+cruce CPA** en al menos un año y **514 se ejecutan sin CPA**. 47 ya están entregados.
+
+**Un proveedor puede mezclar verbos entre sus años** (p. ej. 39974 LEGO: `Descargar/Ejecutar`
+en 2021-2023 y 2025, `Ejecutar` en el resto). El cruce se acota a los años
+`Descargar/Ejecutar` con `--cruzar-anios`; dejar que alcance años que el plan no pidió
+metería CPA donde el plan no la quiso.
+
+### Años salteados → el entregable se recorta
+
+**9 proveedores** traen huecos (44586 → 2020, 2021, **2023**, 2024, 2025; el 2022 tiene
+acción `ninguna`). `F_COMPRAS` se consulta por un **rango continuo**, así que SQL devuelve
+también el año de en medio.
+
+**Regla (decisión de Óscar, 2026-08-18): ese año NO va al entregable.** Tiene acción
+`ninguna` porque ya está terminado o su cobertura es ≥ 90 %; colarlo haría que se **reclame
+de nuevo algo ya cerrado**. El recorte se pide con `--anios` y se aplica sobre el año de
+`rcvdt`, la misma definición de año de §13.
+
+Los 9: 1048 · 14239 · 38331 · 44586 · 68494 · 301531 · 312132 · 326637 · 380204.
+
+### El periodo se anuncia dentro del archivo
+
+Los títulos del **Compras** y de la **Validación** dicen qué periodo se ejecutó:
+
+- Años consecutivos → **`2020-2025`**
+- Años con huecos → **`2020, 2022, 2025`** (se listan todos; el guion mentiría)
+- Un solo año → **`2025`**
+
+> El periodo se deriva de los **renglones que quedaron** (`rcvdt`), no del rango pedido a
+> SQL. Así el título siempre describe lo que el archivo contiene, aunque el rango abarcara
+> más años o el proveedor no tuviera movimientos en alguno.
+
+Un "2020-2025" en un entregable al que le falta 2022 se lee como que ese año **se revisó y
+no tuvo diferencias**, cuando en realidad ni se miró. De ahí la regla.
+
+**Dónde vive el plan:** `plan_ejecucion.xlsx`, que genera
+`scripts/gen_plan_ejecucion.py` (una fila por proveedor, con `anios`, `anios_cruce`,
+`periodo`, `con_huecos`, `prioridad`, `renglones` y `entregado`). Lo consume
+`scripts/ejecutar_bloque1.py --plan plan_ejecucion.xlsx`.
+
+---
+
+## 13.1 "Sin valores" — el proveedor-año que no existe en CPA Vision (2026-08-15)
+
+Cuando CPA Vision **termina** de procesar una solicitud y en la columna *Estatus* de la
+página de Solicitudes escribe **"Sin valores"**, significa que **no existe ni un solo CFDI**
+de ese RFC recibido por Soriana en el periodo pedido.
+
+**Es un resultado definitivo, no un fallo.** No es sesión caída, ni timeout, ni solicitud
+perdida: el portal contestó. **Reintentar no cambia nada**, y antes del 2026-08-15 cada uno
+de estos casos se comía los 2 intentos y los `max_wait_minutes` completos de cada intento.
+
+**Cómo se trata:**
+- El lote lo detecta (`SolicitudSinValores`) y **salta al siguiente proveedor**, sin
+  reintento, sin reiniciar el navegador y sin guardar artefactos de depuración.
+- Queda en las métricas con estatus propio **`sin_valores`** y sale en el resumen como
+  *"Sin valores (saltados)"*, **aparte de los errores**, para no mandar al auditor a
+  perseguir un proveedor que no tiene nada que descargar.
+- Tampoco detiene el lote con `--stop-on-error`.
+- **Para efectos de auditoría va en la misma canasta que los extranjeros sin RFC**: es un
+  proveedor-año del objetivo <90 % que **CPA Vision no puede cubrir**, y así se le reporta a
+  Mónica. No se cuenta como cobertura pendiente.
+
+**Caso conocido:** `IGU880227Q96` — INDUSTRIAS GUACAMAYA SA DE CV (proveedor **44586**),
+año **2023**. Verificado dos veces (2026-08-14 y 2026-08-15).
+
+> ⚠️ **No confundir con `downloaded_after_recovery`**, que es una descarga **buena**: el
+> proveedor tropezó y el reintento la completó. Hasta el 2026-08-15 los resúmenes la contaban
+> como error (por eso `METRICAS_TOTALES.txt` decía 76.5 % de éxito). El criterio correcto es
+> `_ESTATUS_OK = {downloaded, downloaded_after_recovery}`. Como siempre: **el avance real se
+> mide contra el Parquet, no contra el CSV de métricas.**
+
 ---
 
 ## Reporte consolidado de diferencias (2026-08-13 08:40:34)
@@ -659,3 +749,33 @@ Cruzarlos por factura borraría diferencias reales de golpe. **El filtro `XREF3`
 
 Si más adelante negocio quiere considerar maniobras o aportaciones, es una **regla nueva** que
 debe definir Mónica o Luis, con su propio tipo y su propia llave — no un parche a KG-14.
+
+---
+
+## Columnas del archivo Compras (2026-08-14)
+
+El Compras se entrega con **95 columnas**, de `cnpj` a `txt_item`. El cálculo interno sigue
+usando **105**: las 10 restantes son columnas de trabajo que **se calculan pero no se
+escriben**.
+
+| Columna interna | Por qué no se entrega |
+|---|---|
+| `concaten` | Llave de agrupación (folio sin prefijo). Uso interno |
+| `ctouni_sistema`, `ctontol` | Pasos intermedios del costo auditado; el resultado es `cto_aud` |
+| `impaud`, `imp` | Intermedias del importe; el resultado es `imp_aud` |
+| `dpagar` | Intermedia del debió-pagar; el resultado es `debio_pagar_ne` |
+| `dif cto fac ctouni` | Diferencia intermedia de costo unitario |
+| `fante`, `facdecto`, `ctontopza` | Restos de cuando el Excel llevaba fórmulas |
+
+Son herencia de la época en que el libro traía fórmulas de Excel; hoy todo se calcula en
+Python y para el auditor solo son ruido, porque `cto_aud`, `imp_aud` y `debio_pagar_ne` ya
+dicen lo mismo en columnas que sí se entregan.
+
+**El recorte es solo de escritura** (`excel_exporter.COLUMNAS_INTERNAS`), no del cálculo.
+Es deliberado: `concaten` agrupa las hojas por año y `dpagar` alimenta el debió-pagar por
+folio; si se dejaran de calcular, se rompería el pipeline. Al releer un Compras editado,
+`prepare_compras_dataframe` las **recrea** sola, así que el ciclo
+*generar → editar → recalcular → validar* sigue igual.
+
+Verificado con Laboratorios Serral (386029): el ciclo completo sobre el archivo recortado da
+**$54.15**, idéntico al entregable generado con las 105 columnas.
