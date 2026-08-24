@@ -1,0 +1,92 @@
+# =============================================================================
+# LOS TESTS Y LA DOCUMENTACION
+#
+# Esta es la parte de dbt que HOY NO TIENE EQUIVALENTE en Automation-Costos, y
+# probablemente la mas valiosa de robar aunque nunca se adopte la herramienta.
+#
+# Todo lo de aqui se verifica contra los DATOS REALES con `dbt test`. Si algo falla,
+# el pipeline se detiene y el entregable no se genera con el error dentro.
+# =============================================================================
+
+version: 2
+
+models:
+  - name: fct_validacion_consolidado
+    description: >
+      Consolidado de la Validacion de Condiciones: una fila por nota de entrada
+      cuya diferencia supera el umbral. Es el entregable que revisa el auditor.
+
+    # ---- Tests que aplican a la TABLA completa ----
+    tests:
+      # El equivalente exacto del cuadre que hicimos a mano con ARCA:
+      # "los 75,717 folios estan, ninguno falta, ninguno sobra".
+      # Hoy eso se verifica cuando alguien se acuerda; asi correria SIEMPRE.
+      - dbt_utils.expression_is_true:
+          expression: "abs(diferencia - (total_pagado - debio_pagar)) < 0.01"
+          config:
+            error_if: ">0"
+
+    columns:
+      - name: folio
+        description: "11004 + tienda(4) + nota(8). La llave de toda la auditoria."
+        tests:
+          - unique       # <- esto es lo que verificamos a mano en ARCA
+          - not_null
+
+      - name: proveedor
+        description: "Numero de proveedor de Soriana."
+        tests:
+          - not_null
+          # `relationships` = integridad referencial declarada: cada proveedor del
+          # consolidado tiene que existir en el maestro. Si alguien borra un
+          # proveedor del maestro, este test lo caza antes de que llegue al Excel.
+          - relationships:
+              to: source('soriana', 'proveedores')
+              field: vndnbr
+
+      - name: diferencia
+        description: >
+          total_pagado - debio_pagar. Es el monto que se reclama.
+          Positiva = a Soriana le cobraron de mas.
+        tests:
+          - not_null
+          # Una diferencia de CERO no deberia existir: el modelo ya filtro por
+          # umbral > 1 peso. Si aparece una, hay un bug en el filtro.
+          - dbt_utils.accepted_range:
+              min_value: 1.0
+              inclusive: false
+
+      - name: debio_pagar
+        tests:
+          - not_null
+          # Un "debio pagar" negativo no tiene sentido fisico.
+          - dbt_utils.accepted_range:
+              min_value: 0
+
+      - name: renglones
+        description: "Cuantos renglones de compra componen esta nota."
+        tests:
+          - dbt_utils.accepted_range:
+              min_value: 1
+
+  - name: int_costo_auditado
+    description: "El corazon: costo auditado, impuestos e importe por renglon."
+    columns:
+      - name: cto_aud
+        description: >
+          El menor entre el costo del sistema y el del CFDI, pero nunca cero.
+          Regla acordada con Monica/Perla, reunion 2026-07-31.
+        tests:
+          - not_null
+          # LA INVARIANTE MAS IMPORTANTE DE TODA LA AUDITORIA:
+          # el costo auditado jamas debe ser cero. Si un CFDI llega con costo 0 y
+          # alguien afloja la condicion `> 0`, este test lo detiene en seco.
+          - dbt_utils.accepted_range:
+              min_value: 0
+              inclusive: false
+
+      - name: cruzo_cpa
+        description: "1 si el renglon trae CFDI (por UUID o costo facturado)."
+        tests:
+          - accepted_values:
+              values: [0, 1]

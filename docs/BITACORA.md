@@ -12,6 +12,12 @@
 
 <!-- NUEVAS ENTRADAS ARRIBA -->
 
+### 2026-08-24 10:30:16 — [CÓDIGO] RFC en mayusculas tambien en la descarga individual
+
+cpa_vision.request_download_and_wait normalizaba el RFC solo con .strip(), mientras que el camino por lotes (_load_vendor_master_jobs) ya hacia .strip().upper(). El RFC termina siendo el nombre de la particion Hive 'rfc=' del Parquet, y cruce_cpa lo busca en mayusculas contra esa carpeta: una descarga individual escrita en minusculas habria creado 'rfc=djb850527f30' y el cruce no la encontraria, sin error, simplemente sin cruzar nada. Se agrego .upper() en las dos entradas (parametro/config y el input() interactivo, que es el origen mas probable de minusculas). Auditadas las 475 carpetas del acervo: ninguna traia minusculas, asi que no hay datos que reparar. IMPORTANTE: no se normaliza quitando no-alfanumericos como se hace con las facturas, porque 4 RFC legitimos llevan '&' (B&S730507563, C&D640131SR3, J&J920909AV8, M&M030307AW2) y el SAT tambien admite 'N con tilde'; ese filtro los romperia.
+
+---
+
 ### 2026-08-19 14:19:33 — [CÓDIGO] reporte_cruce.py acepta --excluir para separar los gigantes
 
 De los 70 proveedores con entregable, solo CUATRO (76034 Pepsico 6.5M, 392811 Sigma 5.8M, 391250 Arca 1.6M, 73692 Celaya 1.1M) se llevan 3.4 de las 3.9 horas estimadas de reconstruccion; los otros 66 juntos son 35 min. Sin una forma de excluirlos habia que pegar 66 numeros a mano en --vendors. Con --excluir se corre primero lo liviano y se deja lo pesado para cuando la maquina este libre. Estimacion calibrada con la prueba real de FRABEL: 522,610 renglones en ~7 min.

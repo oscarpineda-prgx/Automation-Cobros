@@ -230,9 +230,13 @@ def request_download_and_wait(
     settings = settings or CPAVisionSettings()
     username = username or config.CPA_VISION_USER
     password = password or config.CPA_VISION_PASSWORD
-    rfc = (rfc or config.CPA_VISION_RFC).strip()
+    # `.upper()` igual que el camino por lotes (`_load_vendor_master_jobs`): el RFC termina siendo
+    # el nombre de la particion Hive `rfc=` del Parquet, y el cruce lo busca en mayusculas.
+    # Sin esto, una descarga individual escrita en minusculas crea `rfc=djb850527f30` y
+    # `cruce_cpa` no la encuentra: no truena, simplemente no cruza nada.
+    rfc = (rfc or config.CPA_VISION_RFC).strip().upper()
     if not rfc:
-        rfc = input("RFC proveedor: ").strip()
+        rfc = input("RFC proveedor: ").strip().upper()
     if not rfc:
         raise ValueError("RFC es requerido para solicitar la descarga en CPA Vision.")
 
