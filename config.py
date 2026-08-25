@@ -78,7 +78,10 @@ CPA_VISION_PARQUET_DIR = Path(
 CPA_VISION_STATE_PATH = Path(
     os.getenv("CPA_VISION_STATE_PATH", str(LOG_DIR / "cpavision_state.json"))
 )
-CPA_VISION_HEADLESS = os.getenv("CPA_VISION_HEADLESS", "0").strip().lower() in {
+# Por omision se descarga SIN ventana. Es lo que quiere el uso real: lotes largos que corren
+# de noche o mientras el auditor trabaja en otra cosa, sin que el navegador robe el foco.
+# Para ver el navegador (depurar un cambio del portal): CPA_VISION_HEADLESS=0
+CPA_VISION_HEADLESS = os.getenv("CPA_VISION_HEADLESS", "1").strip().lower() in {
     "1",
     "true",
     "yes",

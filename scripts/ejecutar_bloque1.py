@@ -32,10 +32,7 @@ Uso:
 from __future__ import annotations
 
 import argparse
-import re
-import subprocess
 import sys
-import time
 from datetime import datetime
 from pathlib import Path
 
@@ -51,23 +48,14 @@ for _flujo in (sys.stdout, sys.stderr):
 import pandas as pd
 
 import config
-from automation_costos.utils import safe_filename
+from automation_costos import ejecutor
+from automation_costos.ejecutor import CIERRE_2025, TrabajoSalida
 
-PY = RAIZ / ".venv" / "Scripts" / "python.exe"
+PY = ejecutor.PYTHON
 PLAN = RAIZ / "plan_ejecucion_bloque1.xlsx"
 SALIDA = Path(
     r"X:\Soriana\00 - AUDITORIA 2020 - 2024\Proceso Validación de condiciones (Oscar Pineda)"
 )
-# Nestlé (1.3M) salió bien por el camino normal en 32 min; Arca (11.5M) y Pepsico (10.1M)
-# solo salieron por trimestres. El corte se pone con holgura entre ambos.
-UMBRAL_GRANDE = 1_500_000
-CIERRE_2025 = "2026-03-31"
-
-
-def periodo(anios: list[int]) -> tuple[str, str]:
-    ini = f"{min(anios)}-01-01"
-    fin = CIERRE_2025 if max(anios) >= 2025 else f"{max(anios)}-12-31"
-    return ini, fin
 
 
 def _anios_texto(valor) -> str:
@@ -79,10 +67,7 @@ def _anios_texto(valor) -> str:
 
 def cargar_plan(ruta: Path | None = None, orden: str = "tamano") -> pd.DataFrame:
     df = pd.read_excel(ruta or PLAN)
-    df["anios_lista"] = df["anios"].astype(str).str.split().apply(lambda s: [int(a) for a in s])
     df["renglones"] = pd.to_numeric(df["renglones"], errors="coerce").fillna(0)
-    df[["inicio", "fin"]] = df["anios_lista"].apply(lambda a: pd.Series(periodo(a)))
-    df["grande"] = df["renglones"] > UMBRAL_GRANDE
     # `anios_cruce` trae los años marcados "Descargar/Ejecutar", que son los unicos que
     # llevan cruce con CPA. Dos proveedores (23873 y 43398) mezclan verbos entre sus años,
     # asi que el cruce se acota a ese subconjunto en vez de aplicarse al periodo completo.
@@ -91,12 +76,22 @@ def cargar_plan(ruta: Path | None = None, orden: str = "tamano") -> pd.DataFrame
     # `anios` marcaria como parcial un cruce que en realidad cubre todo el periodo.
     df["anios_cruce"] = df["anios_cruce"].fillna("").apply(_anios_texto)
     df["anios"] = df["anios"].apply(_anios_texto)
-    df["usar_cpa"] = df["anios_cruce"] != ""
-    df["cruce_parcial"] = df["usar_cpa"] & (df["anios_cruce"] != df["anios"])
-    # Años salteados: F_COMPRAS se pide por rango continuo, asi que el año de en medio que
-    # el plan NO pidio (accion "ninguna": ya terminado o cobertura >= 90%) llegaria al
-    # entregable y se volveria a reclamar. `--anios` lo recorta.
-    df["con_huecos"] = df["anios_lista"].apply(lambda a: a != list(range(min(a), max(a) + 1)))
+
+    # A partir de aqui manda `ejecutor.TrabajoSalida`: periodo, camino gigante, cruce y
+    # recorte por años salteados tienen UNA sola definicion, la misma que usa la interfaz.
+    df["trabajo"] = [
+        TrabajoSalida(
+            prov=str(int(f.prov)),
+            nombre=str(f.nombre).strip(),
+            anios=tuple(int(a) for a in str(f.anios).split()),
+            anios_cruce=tuple(int(a) for a in str(f.anios_cruce).split()),
+            renglones=int(f.renglones),
+        )
+        for f in df.itertuples(index=False)
+    ]
+    for columna in ("inicio", "fin", "grande", "usar_cpa", "cruce_parcial", "con_huecos"):
+        df[columna] = [getattr(t, columna) for t in df["trabajo"]]
+
     if orden == "prioridad" and "prioridad" in df.columns:
         # Orden del plan tal cual (por prioridad de negocio). Es el que se quiere cuando se
         # ejecuta por bloques: el bloque 1 son los 20 mas prioritarios, no los 20 mas chicos.
@@ -202,72 +197,6 @@ def resolver_rfc(cursor, vendor: int) -> str:
     return ""
 
 
-def entregados() -> dict[int, list[Path]]:
-    """Numero de proveedor -> Validaciones que ya existen en la carpeta de entregables.
-
-    Se indexa por NUMERO, no reconstruyendo el nombre del archivo, porque ese camino falla
-    de dos formas y las dos se vieron en disco:
-
-    - El nombre de la planeacion no siempre es el `vndname` de SQL con el que se creo la
-      carpeta (acentos, cortes, espacios dobles).
-    - Hay entregables con **sufijo de periodo**: 3M (80622) tiene
-      `Validacion_80622_3M MEXICO SA DE CV_2020-2024.xlsx` y `..._2025.xlsx`, ninguno con
-      el nombre exacto que se esperaba, asi que se daba por pendiente algo ya entregado.
-
-    Un solo escaneo de la carpeta en vez de un `exists()` por proveedor: son cientos de
-    consultas a una unidad de red.
-    """
-    indice: dict[int, list[Path]] = {}
-    if not SALIDA.exists():
-        return indice
-    for carpeta in SALIDA.iterdir():
-        if not carpeta.is_dir():
-            continue
-        m = re.match(r"^(\d+)_", carpeta.name)
-        if not m:
-            continue
-        # `~$...` son temporales de Excel abierto, no entregables.
-        vals = [v for v in carpeta.glob("Validacion_*.xlsx") if not v.name.startswith("~$")]
-        if vals:
-            indice.setdefault(int(m.group(1)), []).extend(vals)
-    return indice
-
-
-def ya_hecho(fila, indice: dict[int, list[Path]] | None = None) -> Path | None:
-    """La Validación del proveedor, si ya existe (para poder reanudar)."""
-    idx = entregados() if indice is None else indice
-    rutas = idx.get(int(fila.prov))
-    return rutas[0] if rutas else None
-
-
-def comandos(fila) -> list[list[str]]:
-    parquet = str(config.CPA_VISION_PARQUET_DIR)
-    prov, ini, fin = str(int(fila.prov)), fila.inicio, fila.fin
-    # El cruce con CPA se hace SOLO donde la columna `accion` dice "Descargar/Ejecutar".
-    # Donde dice solo "Ejecutar" se ejecuta sin CPA aunque el Parquet tenga datos de ese
-    # RFC: buena parte de lo que hay se bajó fuera del alcance del plan, y dejar que el
-    # resultado dependa de eso haría la corrida irreproducible. Decisión de Oscar.
-    if not fila.usar_cpa:
-        extra = ["--sin-cpa"]
-    elif fila.cruce_parcial:
-        extra = ["--cruzar-anios", *fila.anios_cruce.split()]
-    else:
-        extra = []
-    # Solo cuando hay huecos: sin `--anios` el pipeline no recorta nada, que es justo el
-    # comportamiento que quieren los 751 proveedores de periodo continuo.
-    if getattr(fila, "con_huecos", False):
-        extra = [*extra, "--anios", *fila.anios.split()]
-    if not fila.grande:
-        return [[str(PY), "main.py", "cpa-salida", "--vendor", prov, "--start", ini,
-                 "--end", fin, "--parquet", parquet, "--output-dir", str(SALIDA), *extra]]
-    # Gigante: primero los Compras por trimestre, luego la Validación en streaming.
-    base = ["--vendor", prov, "--start", ini, "--end", fin, "--parquet", parquet,
-            "--output-dir", str(SALIDA), *extra]
-    return [
-        [str(PY), "main.py", "cpa-compras-grande", *base],
-        [str(PY), "main.py", "cpa-validacion-grande", *base],
-    ]
-
 
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__)
@@ -293,7 +222,7 @@ def main() -> None:
     # nuevos en vez de 20, y el --start-index seguiria contando huecos. Se comprueba contra
     # el DISCO (existe su Validacion), no contra la columna `entregado` del Excel, que se
     # queda vieja en cuanto corre la primera tanda.
-    indice = entregados()
+    indice = ejecutor.entregados(SALIDA)
     if not args.rehacer:
         antes = len(plan)
         plan = plan[~plan["prov"].astype(int).isin(indice)]
@@ -351,34 +280,15 @@ def main() -> None:
     anota(f"Salida : {SALIDA}")
     anota(f"Parquet: {config.CPA_VISION_PARQUET_DIR}\n")
 
-    ok = fallos = omitidos = 0
-    for n, fila in enumerate(plan.itertuples(index=False), start=1):
-        etiqueta = f"[{n}/{len(plan)}] {int(fila.prov)} {str(fila.nombre).strip()[:40]}"
-        hecho = ya_hecho(fila, indice)
-        if hecho and not args.rehacer:
-            anota(f"{etiqueta}  ya existe, se omite")
-            omitidos += 1
-            continue
-
-        anota(f"{etiqueta}  {fila.inicio}..{fila.fin}  ({int(fila.renglones):,} renglones"
-              f"{', GIGANTE' if fila.grande else ''}"
-              f"{f', cruce CPA solo {fila.anios_cruce}' if fila.cruce_parcial else ', con cruce CPA' if fila.usar_cpa else ', SIN CPA'})")
-        t0 = time.time()
-        log_prov = logdir / f"bloque1_{int(fila.prov)}_{stamp}.log"
-        exito = True
-        with log_prov.open("w", encoding="utf-8") as fh:
-            for cmd in comandos(fila):
-                r = subprocess.run(cmd, cwd=RAIZ, stdout=fh, stderr=subprocess.STDOUT)
-                if r.returncode != 0:
-                    exito = False
-                    break
-        dur = time.time() - t0
-        if exito:
-            ok += 1
-            anota(f"        OK  ·  {dur/60:.1f} min")
-        else:
-            fallos += 1
-            anota(f"        FALLO  ·  {dur/60:.1f} min  ·  ver {log_prov.name}")
+    # El bucle vive en `automation_costos.ejecutor`, que es el mismo que usa la interfaz.
+    res = ejecutor.ejecutar(
+        list(plan["trabajo"]),
+        salida=SALIDA,
+        log=anota,
+        rehacer=args.rehacer,
+        logdir=logdir,
+    )
+    ok, fallos, omitidos = res.ok, res.fallos, res.omitidos
 
     anota(f"\n=== Fin {datetime.now():%Y-%m-%d %H:%M:%S} · OK {ok} · fallos {fallos} · omitidos {omitidos} ===")
     anota(f"Resumen: {resumen}")

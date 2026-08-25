@@ -1,6 +1,6 @@
 # Estado actual del proyecto
 
-> **Última actualización:** 2026-08-15
+> **Última actualización:** 2026-08-24
 > Actualizar este archivo al cerrar cada sesión de trabajo.
 
 ---
@@ -310,9 +310,69 @@ es de **$2.48**: la enorme mayoría son centavos de redondeo, no cobros reales.
 **Decisión pendiente de Óscar / Mónica:** subir el umbral para proveedores grandes, o
 dejarlo y que el auditor filtre. No se cambió nada por cuenta propia.
 
+## La GUI: rediseñada y completa de punta a punta (2026-08-24)
+
+La tarjeta **03 · COLA DE TRABAJO** cerró su último paso. Ya no es solo una cola de descarga:
+cada renglón lleva **qué hacerle** al proveedor y un solo clic corre las dos fases en orden
+—primero todas las descargas, después todos los entregables—, con el **mismo motor** que usa
+la terminal (`ejecutor.py`, el que corre `ejecutar_bloque1.py`).
+
+### La pantalla se reorganizó por vistas, no por "etapas"
+
+"Etapa 1 / Etapa 2" describía cómo se construyó el código, no cómo trabaja el auditor. Ahora
+son **tres vistas con pestañas**, organizadas por la pregunta real al abrir —*¿cuántos
+proveedores?*—: **Un proveedor · Por lotes · Ajustes**.
+
+La pieza central es la **lista de pasos numerada** de la primera vista: cada renglón es el
+botón y dice si ya se hizo (`✓`), si es el siguiente (`▶`) o si no toca (`·`). Eso contesta
+la pregunta que hizo una auditora —*"le di a generar Compras, luego a descargar CPA, ¿ahora
+qué?"*— sin que nadie tenga que preguntarla.
+
+**Medido en máquinas objetivo de 1 núcleo:**
+
+| Al abrir | Antes | Ahora |
+|---|---:|---:|
+| Arranque | 2.62 s | **1.45-1.76 s** |
+| Widgets | 343 | **181** |
+| Canvas | 100 | **53** |
+| Barras de progreso | 8 | **1** |
+
+Cero cambios de lógica de negocio: `ejecutor`, `cola_descarga`, `pipeline`, `cruce_cpa` y
+`cpa_vision` quedaron intactos. Todo el detalle en [GUI.md](GUI.md) §1-5a.
+
+### Qué hace la cola por cada proveedor
+
+| Acción | Descarga | Genera | Cruce EDI |
+|---|:--:|:--:|:--:|
+| Solo descargar *(omisión)* | ✔ | — | — |
+| Descargar y generar | ✔ | ✔ | ✔ |
+| Generar con lo ya descargado | — | ✔ | ✔ |
+| Generar sin cruce de CPA | — | ✔ | — |
+
+Cada opción muestra su explicación en letra chica bajo el desplegable. Los nombres cambiaron
+el 2026-08-24 (antes *"Generar con CPA"* / *"Generar sin CPA"*, que se leían como variantes de
+descargar); las claves internas no, así que las colas guardadas y los Excel de lote viejos
+siguen funcionando.
+
+Detalle completo y decisiones en [GUI.md §5b](GUI.md). Lo verificado: 760/760 proveedores del
+plan siguen produciendo los mismos comandos, el CLI intacto, la ventana construye y sobrevive
+al cambio de tema.
+
+**Pendiente de esta pieza:** probarla contra el portal real (hace falta credencial de CPA
+Vision) y contra SQL, para ver la tabla avanzar renglón por renglón en las dos fases. La
+lógica está probada aislada; lo que falta es la corrida de verdad.
+
+⚠️ **`logs/cola_descarga.json` quedó con dos renglones de prueba** (ARCA 391250 y un BIMBO
+con RFC inventado, `BIM000101AAA`) que escribió una prueba del 2026-08-24 antes de arreglar
+la ruta de persistencia. **Vaciar la cola desde la GUI (botón Limpiar) antes de usarla.**
+
 ## Siguiente paso inmediato
 
 - [x] ~~Descargar el objetivo <90 %~~ — **cerrado el 2026-08-15**, 397/398
+- [x] ~~Cola de trabajo de la GUI con columna «Qué hacer»~~ — **cerrado el 2026-08-24**
+- [x] ~~Rediseño de la interfaz por vistas + lista de pasos~~ — **cerrado el 2026-08-24**
+- [ ] **Limpiar `logs/cola_descarga.json`** (ver el aviso de arriba) y probar la cola contra
+      el portal real y SQL
 - [ ] **Re-correr `actualizar_plan_beneficio.py`** ahora que el objetivo está completo, para
       que el archivo ACTUALIZADO de Mónica refleje el beneficio real de los 23 proveedores
       nuevos. Es el pendiente más inmediato

@@ -7,7 +7,7 @@ import getpass
 from pathlib import Path
 import re
 import time
-from typing import Any
+from typing import Any, Callable
 
 import pandas as pd
 
@@ -293,6 +293,23 @@ def request_download_and_wait(
             browser.close()
 
 
+def _avisar(
+    progreso: Callable[[dict], None] | None,
+    job: "CPAVisionBatchJob",
+    posicion: int,
+    total: int,
+    **datos,
+) -> None:
+    """Notifica el avance de un proveedor. NUNCA lanza: un reporte no tumba una descarga."""
+    if progreso is None:
+        return
+    try:
+        progreso({"posicion": posicion, "total": total, "rfc": job.rfc,
+                  "fechas": job.fechas, **datos})
+    except Exception:  # noqa: BLE001 — la descarga manda, el aviso es accesorio
+        pass
+
+
 def request_vendor_master_batch(
     settings: CPAVisionSettings | None = None,
     *,
@@ -307,8 +324,18 @@ def request_vendor_master_batch(
     parquet_dir: Path | str | None = None,
     continue_on_error: bool = True,
     keep_open: bool = False,
+    progreso: Callable[[dict], None] | None = None,
+    cancelado: SenalCancelacion | None = None,
 ) -> Path:
-    """Process a vendor master Excel in sequential CPA Vision download batches."""
+    """Process a vendor master Excel in sequential CPA Vision download batches.
+
+    `progreso` recibe un dict por cada cambio de estado de un proveedor (al empezar y al
+    terminar). Es lo que permite a la interfaz pintar la cola en vivo; por terminal se
+    omite y todo se comporta igual que antes.
+
+    `cancelado` se consulta **entre proveedores**, que es el punto seguro: nunca a media
+    descarga, para no dejar una solicitud del portal a medio bajar.
+    """
     _require_playwright()
     settings = settings or CPAVisionSettings()
     username = username or config.CPA_VISION_USER
@@ -350,6 +377,10 @@ def request_vendor_master_batch(
 
             total = len(selected_jobs)
             for position, job in enumerate(selected_jobs, start=1):
+                # Punto seguro de cancelacion: entre dos proveedores, con el anterior ya
+                # cerrado y su metrica escrita.
+                revisar(cancelado, f"antes del proveedor {job.rfc}")
+                _avisar(progreso, job, position, total, estado="corriendo")
                 started_at = datetime.now()
                 started_monotonic = time.monotonic()
                 request_id = ""
@@ -518,6 +549,13 @@ def request_vendor_master_batch(
                         status=status,
                         error=error,
                     ),
+                )
+                _avisar(
+                    progreso, job, position, total,
+                    estado=status,
+                    error=error,
+                    filas=parquet_rows,
+                    segundos=time.monotonic() - started_monotonic,
                 )
 
             _resumen_batch(metrics_file)

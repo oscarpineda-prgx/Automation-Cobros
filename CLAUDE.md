@@ -4,7 +4,7 @@
 > sesión de Claude Code. Si el chat se cierra o se borra, leyendo este archivo y los que
 > aquí se enlazan se recupera todo el contexto del proyecto.
 
-**Última actualización:** 2026-07-22 10:53:41
+**Última actualización:** 2026-08-24 15:30:20
 
 ---
 
@@ -17,7 +17,9 @@ Pipeline en dos etapas que **todavía no están conectadas**:
 2. **Scraping CPA Vision**: descarga de documentos del portal del cliente.
 
 **Desde el 2026-07-22 la GUI expone las dos etapas**: la tarjeta *ETAPA 2* ejecuta el cruce
-CPA Vision → Compras. Ver [docs/GUI.md](docs/GUI.md).
+CPA Vision → Compras. Y desde el **2026-08-24** la tarjeta *COLA DE TRABAJO* encadena las dos
+en lote: varios proveedores, cada uno con su periodo y con qué hacerle (solo descargar,
+generar, o descargar y generar), con el mismo motor que la terminal. Ver [docs/GUI.md](docs/GUI.md).
 
 ## 1.1 Quién es quién
 
@@ -51,8 +53,8 @@ Lee estos archivos en este orden para ponerte al día:
 main.py                        Punto de entrada / subcomandos de terminal
 config.py                      Rutas, credenciales, parámetros
 automation_costos/
-  app.py                       GUI (customtkinter) — Etapa 1 + Etapa 2 (cruce CPA Vision)
-  ui.py                        Tema visual PRGX y widgets (sin lógica de negocio)
+  app.py                       GUI (customtkinter) — 3 vistas: Un proveedor / Por lotes / Ajustes
+  ui.py                        Tema PRGX, BarraEstado y Paso (sin lógica de negocio)
   assets/                      prgx-icon.png/.ico, Soriana-Logo.png
   database.py                  Conexión a SQL Server (Trusted_Connection)
   utils.py                     make_folio() y helpers
@@ -60,6 +62,8 @@ automation_costos/
   excel_exporter.py            Genera el Excel "Compras"
   recalculate.py               Relee el Excel editado por el auditor
   validation_exporter.py       Genera "Validacion de Condiciones" y el consolidado
+  ejecutor.py                  🔑 Motor único: qué comandos produce un proveedor y cómo se corren en fila
+  cola_descarga.py             Cola de trabajo de la GUI: acciones + estado por fase (sin Tk)
   cpa_vision.py                Scraping del portal CPA Vision (Playwright) — 80 KB
   cpa_parquet.py               ZIP -> dataset Parquet particionado
   cpa_consolidator.py          Consolidación de salidas CPA

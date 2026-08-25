@@ -125,13 +125,16 @@ def contar_compras(vendor: str, start_date: str, end_date: str) -> int:
     return total
 
 
-def resolver_rfc(vendor: str, start_date: str, end_date: str) -> str:
-    """Devuelve el RFC del proveedor leyendo un solo renglón de F_COMPRAS.
+def resolver_proveedor(vendor: str, start_date: str, end_date: str) -> tuple[str, str]:
+    """Devuelve `(rfc, nombre)` del proveedor leyendo un solo renglón de F_COMPRAS.
 
     El RFC vive en la columna `cnpj` del Compras; para descargar de CPA Vision hace falta
     ese RFC pero no todo el archivo. Un `SELECT TOP (1)` sobre la función es barato (segundos)
     y evita traer las compras completas solo para conocer el RFC. Recorre las fuentes por año
-    y devuelve el primero que encuentre; cadena vacía si el proveedor no tiene compras.
+    y devuelve el primero que encuentre; `("", "")` si el proveedor no tiene compras.
+
+    El nombre viaja junto porque cuesta lo mismo traerlo y es lo que deja ver al usuario que
+    tecleó el proveedor correcto **antes** de encolarlo, en vez de descubrirlo a media tanda.
     """
     inicio = pd.to_datetime(start_date).date()
     fin = pd.to_datetime(end_date).date()
@@ -144,14 +147,19 @@ def resolver_rfc(vendor: str, start_date: str, end_date: str) -> str:
             if desde > hasta:
                 continue
             query = (
-                f"SELECT TOP (1) cnpj FROM {database}.dbo.F_COMPRAS(?, ?, ?) "
+                f"SELECT TOP (1) cnpj, vndname FROM {database}.dbo.F_COMPRAS(?, ?, ?) "
                 f"WHERE cnpj IS NOT NULL;"
             )
             cursor.execute(query, vendor, desde.isoformat(), hasta.isoformat())
             row = cursor.fetchone()
             if row and row[0]:
-                return str(row[0]).strip()
-    return ""
+                return str(row[0]).strip(), str(row[1] or "").strip()
+    return "", ""
+
+
+def resolver_rfc(vendor: str, start_date: str, end_date: str) -> str:
+    """Solo el RFC. Envoltura de `resolver_proveedor` para quien no necesita el nombre."""
+    return resolver_proveedor(vendor, start_date, end_date)[0]
 
 
 def test_connection() -> None:
