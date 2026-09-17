@@ -6,7 +6,7 @@ las columnas de auditoría.
 
 Uso:
     python scripts/generar_guia_columnas.py
-Deja `Guia_Columnas_Compras.docx` en la raíz del proyecto.
+Deja `Guia_Columnas_Compras.docx` en docs/manuales/.
 """
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ from docx import Document
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.shared import Pt, RGBColor
 
-SALIDA = Path(__file__).resolve().parent.parent / "Guia_Columnas_Compras.docx"
+SALIDA = Path(__file__).resolve().parent.parent / "docs" / "manuales" / "Guia_Columnas_Compras.docx"
 
 VERDE = RGBColor(0x00, 0xB0, 0x50)
 AMARILLO = RGBColor(0xBF, 0x90, 0x00)

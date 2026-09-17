@@ -5,7 +5,7 @@ se filtra, y de dónde sale cada columna del Consolidado y del Detalle.
 
 Uso:
     python scripts/generar_guia_validacion.py
-Deja `Guia_Validacion_Condiciones.docx` en la raíz del proyecto.
+Deja `Guia_Validacion_Condiciones.docx` en docs/manuales/.
 """
 
 from __future__ import annotations
@@ -16,7 +16,7 @@ from docx import Document
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.shared import Pt, RGBColor
 
-SALIDA = Path(__file__).resolve().parent.parent / "Guia_Validacion_Condiciones.docx"
+SALIDA = Path(__file__).resolve().parent.parent / "docs" / "manuales" / "Guia_Validacion_Condiciones.docx"
 
 AZUL = RGBColor(0x1F, 0x4E, 0x78)
 VERDE = RGBColor(0x00, 0xB0, 0x50)
