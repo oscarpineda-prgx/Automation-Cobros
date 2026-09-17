@@ -52,7 +52,7 @@ from automation_costos import ejecutor
 from automation_costos.ejecutor import CIERRE_2025, TrabajoSalida
 
 PY = ejecutor.PYTHON
-PLAN = RAIZ / "plan_ejecucion_bloque1.xlsx"
+PLAN = RAIZ / "datos" / "planeacion" / "plan_ejecucion_bloque1.xlsx"
 SALIDA = Path(
     r"X:\Soriana\00 - AUDITORIA 2020 - 2024\Proceso Validación de condiciones (Oscar Pineda)"
 )
@@ -158,7 +158,7 @@ RFC_POR_PROVEEDOR = {
     23873: "CEGM8802092Z8",
     43398: "GCA960122UD0",
 }
-CACHE_RFC = RAIZ / "rfc_por_proveedor.csv"
+CACHE_RFC = RAIZ / "datos" / "referencias" / "rfc_por_proveedor.csv"
 # Ventanas validas por base de compras: el RFC se busca donde haya movimientos.
 _VENTANAS_RFC = [
     ("SORIANA_PROJECTS", "2020-01-01", "2024-12-31"),

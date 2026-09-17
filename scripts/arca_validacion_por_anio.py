@@ -77,7 +77,7 @@ COMPRAS_DIR = Path(
     rf"\{PROVEEDOR}_{NOMBRE}"
 )
 SALIDA_DIR = COMPRAS_DIR
-FILTRO = RAIZ / "VF mayor a $20MX Dis Arca.xlsx"
+FILTRO = RAIZ / "datos" / "muestras" / "VF mayor a $20MX Dis Arca.xlsx"
 # Un Parquet por trimestre en vez de uno solo: leer los 24 Compras son horas, y asi un
 # fallo a la mitad no obliga a empezar de cero (se salta lo que ya esta escrito).
 CACHE_DIR = RAIZ / "outputs" / "arca_detalle_filtrado"

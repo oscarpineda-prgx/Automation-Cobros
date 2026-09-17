@@ -137,6 +137,24 @@ python main.py cpa-downloads-page --download-dir outputs\cpa_vision --skip-confi
 
 Si no se configura `CPA_VISION_PASSWORD`, el comando la pide por consola.
 
+## Estructura de carpetas
+
+La raíz solo tiene los puntos de entrada y el empaquetado. Todo insumo de trabajo
+vive en `datos/`:
+
+| Carpeta | Qué contiene |
+|---|---|
+| `datos/planeacion/` | Planeación vs %EDI (base y actualizada), prioridad de proveedores y los planes de ejecución |
+| `datos/lotes/` | Lotes de descarga, pendientes por bloque, cobertura y el reporte de extranjeros |
+| `datos/referencias/` | `rfc_por_proveedor.csv`, `vendor_master_fechas.xlsx` e inventario CPA |
+| `datos/muestras/` | Archivos de ejemplo de un proveedor concreto |
+| `docs/manuales/` | Manual de usuario, guías de columnas y de validación |
+| `docs/imagenes/` | Diagrama del flujo |
+| `tests/` | `test_cruce_cpa.py` |
+
+Al agregar un insumo nuevo, va en la subcarpeta que le toque de `datos/`, no en la
+raíz. Los scripts lo referencian como `RAIZ / "datos" / "<subcarpeta>" / "<archivo>"`.
+
 ## Configuracion
 
 La conexion esta en `config.py` y usa estos valores por defecto:

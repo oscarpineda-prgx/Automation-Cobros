@@ -26,8 +26,8 @@ import config
 from scripts.beneficio_cpa import beneficio_proveedor
 from scripts.gen_lote_monica import cobertura_parquet, resolver_rfc
 
-PLAN = RAIZ / "Planeacion vs %EDI poblado Soriana.xlsx"
-SALIDA = RAIZ / "Planeacion vs %EDI poblado Soriana_ACTUALIZADO.xlsx"
+PLAN = RAIZ / "datos" / "planeacion" / "Planeacion vs %EDI poblado Soriana.xlsx"
+SALIDA = RAIZ / "datos" / "planeacion" / "Planeacion vs %EDI poblado Soriana_ACTUALIZADO.xlsx"
 
 
 def cargar_plan() -> pd.DataFrame:

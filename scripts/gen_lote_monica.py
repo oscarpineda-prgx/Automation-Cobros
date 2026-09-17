@@ -38,11 +38,11 @@ import pyodbc
 
 import config
 
-PLAN = RAIZ / "Planeacion vs %EDI poblado Soriana.xlsx"
-PRIORIDAD = RAIZ / "Prioridad_Proveedores_CPA.xlsx"
+PLAN = RAIZ / "datos" / "planeacion" / "Planeacion vs %EDI poblado Soriana.xlsx"
+PRIORIDAD = RAIZ / "datos" / "planeacion" / "Prioridad_Proveedores_CPA.xlsx"
 PARQUET = config.CPA_VISION_PARQUET_DIR
-SALIDA = RAIZ / "descarga_monica_pendientes.xlsx"
-EXTRANJEROS = RAIZ / "reporte_monica_extranjeros.xlsx"
+SALIDA = RAIZ / "datos" / "lotes" / "descarga_monica_pendientes.xlsx"
+EXTRANJEROS = RAIZ / "datos" / "lotes" / "reporte_monica_extranjeros.xlsx"
 
 # Ventanas validas por base de compras (limite superior real de cada una).
 VENTANAS = [

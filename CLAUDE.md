@@ -76,12 +76,26 @@ scripts/
   reporte_diferencias.py       Regenera a mano el reporte consolidado de diferencias
   ejecutar_bloque1.py          Corre un bloque de proveedores, uno por proceso
   validar_formulas_impuesto.py Doble validación de las fórmulas de impuesto (DuckDB)
-test_cruce_cpa.py              Prueba del cruce con datos reales de Alceda
+tests/
+  test_cruce_cpa.py            Prueba del cruce con datos reales de Alceda
 templates/                     Plantillas Excel base
+datos/                         Insumos de trabajo (antes sueltos en la raíz)
+  planeacion/                  Planeación vs %EDI, prioridad y planes de ejecución
+  lotes/                       Lotes de descarga, pendientes y cobertura por bloque
+  referencias/                 rfc_por_proveedor.csv, vendor_master_fechas, inventario CPA
+  muestras/                    Archivos de ejemplo de un proveedor concreto
+docs/
+  manuales/                    Manual, guías y PDF (los generan scripts/generar_*.py)
+  imagenes/                    Diagrama de flujo
 outputs/                       Salidas generadas (no versionado)
 logs/                          Logs de ejecución (no versionado)
-scripts/log_cambio.py          Helper para agregar entradas fechadas a la bitácora
 ```
+
+**Dónde va cada archivo nuevo.** Los insumos de trabajo van a `datos/<subcarpeta>`,
+nunca a la raíz; los scripts los referencian como `RAIZ / "datos" / "<sub>" / "<archivo>"`.
+La raíz se reserva para los puntos de entrada (`main.py`, `config.py`), el empaquetado
+(`AutomationCostos.spec`, `build_exe.ps1`, `requirements.txt`) y los dos documentos
+de cabecera (`README.md`, `CLAUDE.md`).
 
 ## 4. Reglas de trabajo para Claude en este proyecto
 

@@ -47,9 +47,9 @@ import pandas as pd
 import config
 from automation_costos.utils import formatear_periodo, safe_filename
 
-PLAN = RAIZ / "Planeacion vs %EDI poblado Soriana.xlsx"
-PRIORIDAD = RAIZ / "Prioridad_Proveedores_CPA.xlsx"
-SALIDA = RAIZ / "plan_ejecucion.xlsx"
+PLAN = RAIZ / "datos" / "planeacion" / "Planeacion vs %EDI poblado Soriana.xlsx"
+PRIORIDAD = RAIZ / "datos" / "planeacion" / "Prioridad_Proveedores_CPA.xlsx"
+SALIDA = RAIZ / "datos" / "planeacion" / "plan_ejecucion.xlsx"
 
 COLUMNAS = [
     "anio", "prov", "nombre", "reg_compras", "reg_edi", "pct",

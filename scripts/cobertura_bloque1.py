@@ -43,8 +43,8 @@ BLOQUE = Path(
 # Pedido suelto de Oscar, fuera del archivo del bloque.
 EXTRA: list[tuple[int, int]] = [(17222, 2021)]
 
-DETALLE = RAIZ / "cobertura_bloque1.xlsx"
-PENDIENTES = RAIZ / "descarga_bloque1_pendientes.xlsx"
+DETALLE = RAIZ / "datos" / "lotes" / "cobertura_bloque1.xlsx"
+PENDIENTES = RAIZ / "datos" / "lotes" / "descarga_bloque1_pendientes.xlsx"
 
 
 def cargar_bloque() -> pd.DataFrame:
