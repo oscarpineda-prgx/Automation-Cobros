@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import re
 import subprocess
+import sys
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -31,6 +32,32 @@ from automation_costos.cancelacion import SenalCancelacion, revisar
 
 RAIZ = Path(__file__).resolve().parent.parent
 PYTHON = RAIZ / ".venv" / "Scripts" / "python.exe"
+
+#: ¿Corremos dentro del .exe empaquetado por PyInstaller?
+CONGELADO = bool(getattr(sys, "frozen", False))
+
+
+def lanzador(python: Path | str = PYTHON) -> list[str]:
+    """Con que se arranca un subcomando.
+
+    Empaquetado **no hay `python.exe` ni `main.py`**: los dos viven en el repositorio, no
+    dentro del ejecutable. Pero el punto de entrada del .exe *es* `main.py`, que ya despacha
+    subcomandos (y abre la interfaz solo cuando no le dan ninguno), asi que el ejecutable se
+    **auto-invoca**: `AutomationCostos.exe cpa-salida --vendor ...` corre exactamente el
+    mismo codigo que `python main.py cpa-salida ...`.
+
+    Sin empaquetar, el interprete del entorno y el script de siempre.
+    """
+    return [sys.executable] if CONGELADO else [str(python), "main.py"]
+
+
+def directorio_trabajo() -> Path:
+    """Desde donde se lanzan los subprocesos.
+
+    Empaquetado, `RAIZ` apunta dentro de `_internal` (es donde acaba este modulo), que no es
+    un directorio de trabajo util. Se usa la carpeta del ejecutable.
+    """
+    return Path(sys.executable).parent if CONGELADO else RAIZ
 
 # El periodo "2025" arrastra a 2026: facturas subidas tarde y pagos con plazo de hasta 90
 # dias (acuerdo con Monica, reunion 008).
@@ -129,12 +156,14 @@ def comandos(
 
     base = ["--vendor", str(trabajo.prov), "--start", trabajo.inicio, "--end", trabajo.fin,
             "--parquet", parquet, "--output-dir", str(salida), *extra]
+    # `lanzador()` decide si esto es `python main.py ...` o el propio .exe auto-invocandose.
+    arranque = lanzador(python)
     if not trabajo.grande:
-        return [[str(python), "main.py", "cpa-salida", *base]]
+        return [[*arranque, "cpa-salida", *base]]
     # Gigante: primero los Compras por trimestre, luego la Validacion en streaming.
     return [
-        [str(python), "main.py", "cpa-compras-grande", *base],
-        [str(python), "main.py", "cpa-validacion-grande", *base],
+        [*arranque, "cpa-compras-grande", *base],
+        [*arranque, "cpa-validacion-grande", *base],
     ]
 
 
@@ -192,14 +221,14 @@ def ejecutar(
 
     `cancelado` se consulta **entre proveedores**, nunca a media escritura de un entregable.
     """
-    # Cada proveedor corre como un subproceso de `main.py`, asi que hace falta el interprete
-    # del entorno. Se comprueba UNA vez y de entrada: si falta, el sintoma seria N fallos
-    # seguidos con "el sistema no puede encontrar el archivo" enterrados en N logs.
-    if not Path(PYTHON).exists():
+    # Sin empaquetar hace falta el interprete del entorno. Se comprueba UNA vez y de entrada:
+    # si falta, el sintoma seria N fallos seguidos con "el sistema no puede encontrar el
+    # archivo" enterrados en N logs. Empaquetado no aplica: el lanzador es el propio .exe.
+    if not CONGELADO and not Path(PYTHON).exists():
         raise FileNotFoundError(
             f"No se encontró el intérprete del entorno virtual: {PYTHON}\n"
-            "La generación de entregables lanza `main.py` como subproceso y lo necesita "
-            "(crea el .venv, o ejecuta desde el repositorio en vez del .exe empaquetado)."
+            "La generación de entregables lanza `main.py` como subproceso y lo necesita. "
+            "Crea el .venv (ver README)."
         )
 
     salida = Path(salida)
@@ -234,7 +263,10 @@ def ejecutar(
         exito = True
         with log_prov.open("w", encoding="utf-8") as fh:
             for cmd in comandos(trabajo, salida=salida, parquet=parquet):
-                if subprocess.run(cmd, cwd=RAIZ, stdout=fh, stderr=subprocess.STDOUT).returncode:
+                completado = subprocess.run(
+                    cmd, cwd=directorio_trabajo(), stdout=fh, stderr=subprocess.STDOUT
+                )
+                if completado.returncode:
                     exito = False
                     break
         dur = time.time() - t0

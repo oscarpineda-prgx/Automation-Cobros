@@ -21,13 +21,19 @@ import xlsxwriter
 
 import config
 from automation_costos.calculations import (
+    COLUMNAS_AUDITOR,
     COMPRAS_COLUMNS,
     EDI_COLUMNS,
     apply_display_formula_values,
     build_pending_edi_dataframe,
     prepare_compras_dataframe,
 )
-from automation_costos.utils import anios_de_compras, ensure_parent, formatear_periodo
+from automation_costos.utils import (
+    anios_de_compras,
+    clean_code,
+    ensure_parent,
+    formatear_periodo,
+)
 
 # Columnas de TRABAJO: se siguen calculando (el pipeline y el agrupado por año dependen de
 # varias) pero NO se escriben en el archivo. Son intermedias del cálculo —restos de cuando
@@ -62,12 +68,32 @@ SHEET_ROW_LIMIT = 1_048_576  # tope duro de filas por hoja en Excel
 UMBRAL_PARTIR_POR_ANIO = 1_000_000
 
 _HEADER_BG = "#00FD28"
-_AUDIT_BG = "#E2F0D9"
-_EDI_BG = "#FFF2CC"
 _TITLE_COLOR = "#000000"
 
+# --- El codigo de color del Compras (acordado con Monica, 2026-09-11) -----------------
+#
+# El color dice QUE SE HACE con cada columna, y esa es toda su razon de ser:
+#
+#   verde oscuro  -> DATO DE ORIGEN. Viene del sistema y de CPA Vision. **No se edita**:
+#                    lo que el cruce rellena se queda como esta y el resto tal cual vino.
+#   piel          -> LO QUE EDITA EL AUDITOR. Son las tres columnas auditadas.
+#   verde claro   -> RESULTADO. Se recalcula solo a partir de las de color piel.
+#
+# Antes el piel estaba en el bloque EDI, que es justo lo que el auditor NO toca: invitaba
+# a corregir el dato de origen en vez del criterio de auditoria.
+_EDI_BG = "#375623"          # verde oscuro: dato de origen, no se edita
+_EDI_FONT = "#FFFFFF"        # sobre verde oscuro, el texto negro no se lee
+_AUDITOR_BG = "#FFF2CC"      # piel: lo que edita el auditor
+_AUDIT_BG = "#E2F0D9"        # verde claro: resultado calculado
+
+#: Las tres que edita el auditor. La lista vive en `calculations` porque es una regla de
+#: negocio, no una decision de presentacion; aqui solo se pinta.
+_AUDITOR_COLS = frozenset(COLUMNAS_AUDITOR)
+
+#: El resultado: de `imp_aud` a `dif_det_inv`. Se recalcula siempre a partir de las de
+#: color piel, asi que editarlas a mano no sirve de nada.
 _AUDIT_COLS = frozenset({
-    "cto_aud", "iva_aud", "ieps_aud", "imp_aud",
+    "imp_aud",
     "debio_pagar_ne", "dif_det_ne", "debio_pagar_inv", "tot_pagado_inv", "dif_det_inv",
 })
 
@@ -76,6 +102,54 @@ _WIDTHS = {
     "rcvnbr": 12, "rcvdt": 12, "strnbr": 12, "invnbr": 18, "itmdesc": 34,
     "uuid": 36, "txt_cabec": 24, "txt_item": 24,
 }
+
+# --- Formato numerico de la hoja (peticion de Monica, 2026-08-27) ---------------------
+# Los valores se escriben como numeros crudos y Excel los mostraba en "General": de ahi
+# salian `21.000000000`, `345.120000000` y `2E+06`. El formato se aplica por COLUMNA (con
+# `set_column`), no celda por celda: xlsxwriter en modo `constant_memory` escribe en
+# streaming y un formato por celda multiplicaria la memoria justo en los proveedores
+# grandes. El dato guardado NO cambia — solo cambia como se ve.
+_FMT_MONTO = "#,##0.00"      # dinero y costos: dos decimales, con separador de miles
+_FMT_TASA = "0.######"       # tasas y factores: sin ceros de relleno (0.16, 0.265)
+_FMT_CANTIDAD = "#,##0.##"   # piezas/cajas: 21 se ve 21, no 21.000000000
+_FMT_ENTERO = "0"            # folios numericos: evita la notacion cientifica (2E+06)
+
+_COLS_MONTO = frozenset({
+    "poitmgrscst", "poitmnetcst", "ctouni",
+    "compra_bruta", "compra_bruta mas impuestos", "compra_neta", "compra neta mas impuestos",
+    "ctobto_edi", "ctonto_edi", "impart_edi", "imieps_edi", "impiva_edi", "totfactura",
+    "cto_aud", "imp_aud",
+    "debio_pagar_ne", "dif_det_ne", "debio_pagar_inv", "tot_pagado_inv", "dif_det_inv",
+    "paynetamt", "tot_pagado_ne",
+})
+
+# Tasas y factores de descuento: NO llevan dos decimales. Un IEPS de 0.265 redondeado a
+# 0.27 cambiaria el impuesto calculado a la vista del auditor.
+_COLS_TASA = frozenset({
+    "ieps_t007s", "iva_t007s", "prieps_edi", "poriva_edi", "iva_aud", "ieps_aud",
+    "nor1_konv", "nor2_konv", "nor3_konv", "nor4_konv",
+    "adi1_konv", "adi2_konv", "adi3_konv",
+    "bonif1_konv", "bonif2_konv", "bonif3_konv", "bonif4_konv", "bonif5_konv",
+    "pp_konv", "cen_konv", "porccargo_konv", "fact_desct",
+})
+
+_COLS_CANTIDAD = frozenset({
+    "fact_empaq", "poitmcspck", "poqty", "rcvqty", "invqty", "can_rec",
+    "canfac_edi", "factem_edi",
+})
+
+_COLS_ENTERO = frozenset({"vndnbr", "dptnbr", "ponbr", "rcvnbr", "strnbr"})
+
+
+def _formato_columna(wb, column: str):
+    """Formato de presentacion de una columna, o `None` si va tal cual (texto/fecha)."""
+    for grupo, codigo in (
+        (_COLS_MONTO, _FMT_MONTO), (_COLS_TASA, _FMT_TASA),
+        (_COLS_CANTIDAD, _FMT_CANTIDAD), (_COLS_ENTERO, _FMT_ENTERO),
+    ):
+        if column in grupo:
+            return wb.add_format({"num_format": codigo})
+    return None
 
 
 def write_compras_workbook(
@@ -100,6 +174,46 @@ def write_compras_workbook(
     prepared = _preparar_para_escritura(df, already_prepared)
     _escribir_libro(output_path, prepared, vendor, start_date, end_date)
     return output_path
+
+
+def write_compras_cruzado(
+    df: pd.DataFrame,
+    output_path: Path,
+    *,
+    vendor: str | None = None,
+    start_date: str | None = None,
+    end_date: str | None = None,
+) -> Path:
+    """Escribe el resultado del cruce CPA como un **Compras de verdad**, no como un volcado.
+
+    Es el punto UNICO de escritura del paso "Rellenar EDI con los CFDI", y lo comparten la
+    interfaz y el subcomando `cpa-cruce` para que no puedan volver a separarse.
+
+    **Por que existe.** Los dos escribian con `DataFrame.to_excel(index=False)`: hoja
+    "Sheet1", encabezados en la fila 1 y sin formato. Pero un Compras tiene el titulo
+    arriba, los **encabezados en la fila 7** y una hoja por año llamada "Compras <año>", que
+    es justo lo que `recalculate.read_compras_workbook` busca al releerlo. Resultado medido
+    el 2026-09-11 sobre un archivo de 10 renglones: el recalculo tomaba el **renglon 6 como
+    encabezado**, devolvia 4 renglones y las columnas salian con nombres inventados
+    (`cnpj5`, `5`, `vndname5`). La cadena paso 3 -> paso 4 estaba rota y **no avisaba**:
+    producia un archivo que parecia valido.
+
+    Solo se notaba haciendo el cruce por separado. `generar_salida_proveedor` ("GENERAR
+    TODO") nunca paso por aqui porque cruza en memoria y escribe el Compras una sola vez.
+
+    El proveedor del titulo se deduce del propio DataFrame cuando no se indica: quien cruza
+    un archivo suelto no tiene por que volver a teclear de quien es.
+    """
+    if not vendor:
+        vendor = _vendor_del_dataframe(df)
+    return write_compras_workbook(df, output_path, vendor, start_date, end_date)
+
+
+def _vendor_del_dataframe(df: pd.DataFrame) -> str | None:
+    """Numero de proveedor tomado de la columna `vndnbr`, o None si no se puede saber."""
+    if "vndnbr" in df.columns and df["vndnbr"].notna().any():
+        return clean_code(df["vndnbr"].dropna().iloc[0]) or None
+    return None
 
 
 def write_compras_files(
@@ -283,7 +397,8 @@ def _write_compras_sheet(
 
     title = wb.add_format({"bold": True, "font_size": 14, "align": "center", "font_color": _TITLE_COLOR})
     hdr = wb.add_format({"bold": True, "bg_color": _HEADER_BG, "border": 1, "align": "center", "valign": "vcenter", "text_wrap": True})
-    hdr_edi = wb.add_format({"bold": True, "bg_color": _EDI_BG, "border": 1, "align": "center", "valign": "vcenter", "text_wrap": True})
+    hdr_edi = wb.add_format({"bold": True, "bg_color": _EDI_BG, "font_color": _EDI_FONT, "border": 1, "align": "center", "valign": "vcenter", "text_wrap": True})
+    hdr_auditor = wb.add_format({"bold": True, "bg_color": _AUDITOR_BG, "border": 1, "align": "center", "valign": "vcenter", "text_wrap": True})
     hdr_aud = wb.add_format({"bold": True, "bg_color": _AUDIT_BG, "border": 1, "align": "center", "valign": "vcenter", "text_wrap": True})
 
     # Logo + titulo (solo en la primera hoja)
@@ -299,10 +414,21 @@ def _write_compras_sheet(
         ws.merge_range(3, 3, 3, 11, f"Compras Periodo {etiqueta}", title)
 
     # Encabezados de columna (con resaltado EDI/auditoria)
+    # Los formatos numericos se crean UNA vez por libro y se reusan entre hojas: un
+    # `add_format` por columna y por hoja dejaria cientos de objetos equivalentes.
+    if not hasattr(wb, "_fmt_numeros"):
+        wb._fmt_numeros = {c: _formato_columna(wb, c) for c in COLUMNAS_SALIDA}
+
     for col_idx, column in enumerate(COLUMNAS_SALIDA):
-        formato = hdr_edi if column in EDI_COLUMNS else hdr_aud if column in _AUDIT_COLS else hdr
+        # El orden importa: primero lo que se edita, luego el origen, luego el resultado.
+        formato = (
+            hdr_auditor if column in _AUDITOR_COLS
+            else hdr_edi if column in EDI_COLUMNS
+            else hdr_aud if column in _AUDIT_COLS
+            else hdr
+        )
         ws.write(HEADER_ROW, col_idx, column, formato)
-        ws.set_column(col_idx, col_idx, _WIDTHS.get(column, 13))
+        ws.set_column(col_idx, col_idx, _WIDTHS.get(column, 13), wb._fmt_numeros.get(column))
 
     # Datos como valores, en streaming. Se recorta por POSICION en cada renglon en vez de
     # hacer `df[COLUMNAS_SALIDA]`: esa seleccion consolidaria bloques y copiaria millones de

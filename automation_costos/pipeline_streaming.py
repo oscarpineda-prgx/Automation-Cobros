@@ -15,8 +15,9 @@ Se hace en **dos pasadas** (la consulta a SQL es barata, del orden de segundos):
 3. **Pasada 2 — escribir:** por año, traer + cruzar otra vez, pegarle los totales globales del
    folio y escribir `Compras_<base>_<año>.xlsx`. Se juntan las filas de los folios con
    diferencia para la Validación.
-4. **Validación:** con esas filas (chicas) se reusa `write_validation_from_dataframe` → una
-   sola Validación consolidada.
+4. **Validación:** las filas de los folios con diferencia se dejan en pickles temporales (uno
+   por trimestre) y `write_validation_streaming` arma con ellos una sola Validación
+   consolidada, leyéndolos de uno en uno.
 
 Es equivalente, renglón por renglón, al camino normal (verificado forzando un proveedor que
 sí cabe por ambos caminos). No modifica el camino normal ni la función de SQL.
@@ -25,13 +26,16 @@ sí cabe por ambos caminos). No modifica el camino normal ni la función de SQL.
 from __future__ import annotations
 
 import gc
+import shutil
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Sequence
 
 import pandas as pd
 
 import config
+from automation_costos.cancelacion import SenalCancelacion, revisar
 from automation_costos.calculations import (
     COMPRAS_COLUMNS,
     apply_display_formula_values,
@@ -53,11 +57,14 @@ from automation_costos.pipeline import (
     actualizar_reporte_consolidado,
     copiar_soportes_cpa,
 )
-from automation_costos.utils import make_folio_series, to_number
+from automation_costos.utils import (
+    anios_de_compras,
+    formatear_periodo,
+    make_folio_series,
+    to_number,
+)
 from automation_costos.validation_exporter import (
     _COLUMNAS_FUENTE,
-    write_validation_from_dataframe,
-    write_validation_rapida,
     write_validation_streaming,
 )
 
@@ -85,11 +92,27 @@ def generar_salida_proveedor_por_anios(
     *,
     log: Callable[[str], None] = print,
     usar_cpa: bool = True,
+    cancelado: SenalCancelacion | None = None,
+    reanudar: bool = False,
+    por_mes: bool = False,
 ) -> ResultadoPipeline:
     """Genera Compras (un archivo por TRIMESTRE) + Validación consolidada, por trozos.
 
     Un año completo de estos proveedores (1.6M compras + 2.9M CPA) no cabe en RAM, así que se
-    procesa por trimestre. La Validación se consolida globalmente en un solo archivo."""
+    procesa por trimestre. La Validación se consolida globalmente en un solo archivo.
+
+    `cancelado` se consulta **al empezar cada trimestre**, que es la unica frontera donde no
+    hay nada a medio escribir. Estas corridas duran horas: sin puntos de corte, "Detener" no
+    significaba nada justo donde mas falta hace.
+
+    `reanudar` reusa los `Compras_*.xlsx` que ya estén en disco en vez de reescribirlos. Es
+    para retomar una corrida que murió DESPUÉS de escribirlos (p. ej. en la Validación): el
+    re-cruce es determinista, así que el archivo del disco es el mismo que se escribiría, y
+    saltarlo ahorra los minutos que cuesta volcar cada Excel de cientos de MB.
+
+    `por_mes` arranca partiendo por mes en vez de por trimestre. Normalmente no hace falta:
+    el trimestre que no quepa se parte solo (ver `_recorrer_intervalos`). Está para forzarlo
+    de antemano en una máquina que ya se sabe justa de memoria y ahorrarse el intento fallido."""
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     umbral = config.VALIDATION_DIFFERENCE_THRESHOLD
@@ -101,23 +124,50 @@ def generar_salida_proveedor_por_anios(
     con_datos: list[_Intervalo] = []
     # Un ResultadoCruce por trimestre; al final se suman para el reporte de metricas.
     metricas_cruce: list = []
-    intervalos = _intervalos_trimestre(start_date, end_date)
+    intervalos = _intervalos_mes(start_date, end_date) if por_mes else _intervalos_trimestre(start_date, end_date)
 
     # -- PASADA 1: por trimestre -> cruzar y acumular por folio y factura (sin guardar filas) --
-    for etiqueta, ini, fin in intervalos:
+    marca_metricas = 0
+    hubo_datos = False
+
+    def _pasada1(etiqueta: str, ini: str, fin: str) -> None:
+        nonlocal folio_acc, inv_acc, rfc, base, marca_metricas, hubo_datos
+        marca_metricas = len(metricas_cruce)
         log(f"[pasada 1 · {etiqueta}] Compras desde SQL y cruce...")
         salida = _salida_intervalo(vendor, ini, fin, parquet_root, usar_cpa=usar_cpa,
                                    metricas=metricas_cruce)
         if salida is None:
             log("                   (sin renglones)")
-            continue
+            return
         prepared, rfc, base = salida
-        folio_acc = _fundir(folio_acc, _agg_por_clave(prepared, _folio(prepared), con_dsp=True), con_dsp=True)
-        inv_acc = _fundir(inv_acc, _agg_por_clave(prepared, _invoice_group_key(prepared), con_dsp=False), con_dsp=False)
-        con_datos.append(_Intervalo(etiqueta, ini, fin))
+        # Los dos acumulados se calculan ANTES de reasignar ninguno: si el segundo `_fundir`
+        # se queda sin memoria, `folio_acc` no debe haber absorbido ya este intervalo, o el
+        # reintento por meses lo sumaría otra vez y los importes saldrían inflados.
+        nuevo_folio = _fundir(folio_acc, _agg_por_clave(prepared, _folio(prepared), con_dsp=True), con_dsp=True)
+        nuevo_inv = _fundir(inv_acc, _agg_por_clave(prepared, _invoice_group_key(prepared), con_dsp=False), con_dsp=False)
+        folio_acc, inv_acc = nuevo_folio, nuevo_inv
+        hubo_datos = True
         log(f"                   {len(prepared):,} renglones · acumulados")
         del prepared, salida
         gc.collect()
+
+    def _deshacer_pasada1(etiqueta: str, ini: str, fin: str) -> None:
+        # `folio_acc`/`inv_acc` son atómicos (ver arriba), así que solo hay que retirar lo que
+        # el intento fallido sí alcanzó a registrar: su métrica de cruce.
+        del metricas_cruce[marca_metricas:]
+
+    # La pasada 1 puede partir hasta el DÍA —solo acumula, sus trozos no son entregables— pero
+    # `con_datos` guarda el TRIMESTRE, no el trozo que acabó funcionando. Así la pasada 2
+    # arranca otra vez desde el trimestre y degrada por su cuenta con piso de mes, en vez de
+    # heredar una granularidad de días que produciría cientos de `Compras_*.xlsx`.
+    for etiqueta, ini, fin in intervalos:
+        hubo_datos = False
+        _recorrer_intervalos(
+            [(etiqueta, ini, fin)], _pasada1, log=log, cancelado=cancelado,
+            fase="la pasada 1 de", deshacer=_deshacer_pasada1, piso=PISO_DIA,
+        )
+        if hubo_datos:
+            con_datos.append(_Intervalo(etiqueta, ini, fin))
 
     if folio_acc is None or not con_datos:
         raise ValueError(f"El proveedor {vendor} no devolvió compras en {start_date}..{end_date}.")
@@ -132,38 +182,107 @@ def generar_salida_proveedor_por_anios(
     proveedor_dir.mkdir(parents=True, exist_ok=True)
 
     # -- PASADA 2: por trimestre -> re-cruzar, pegar totales globales, escribir Compras + detalle
+    #
+    # 2026-08-25 · El detalle NO se acumula en memoria. Antes se guardaba `trozo.copy()` de
+    # cada trimestre —las 105 columnas del Compras— y al final se concatenaba todo para
+    # `write_validation_from_dataframe`, que arma el libro con openpyxl: los objetos Cell de
+    # las ~10M celdas del "Detalle PAGOS" viven todos a la vez. PROPIMEX (472k renglones de
+    # folios con diferencia) reventó ahí con MemoryError, con los cinco Compras ya escritos y
+    # ~35 min de trabajo tirado. Ahora cada trimestre se recorta a las columnas que alimentan
+    # la Validación y se deja en un pickle temporal; el libro lo escribe
+    # `write_validation_streaming` (xlsxwriter en constant_memory), que ya existía para el
+    # camino de los gigantes y lee los trozos de uno en uno. Mismo contenido, pico acotado.
     compras_paths: list[Path] = []
-    detalle_partes: list[pd.DataFrame] = []
-    for iv in con_datos:
-        log(f"[pasada 2 · {iv.etiqueta}] re-cruce y escritura del Compras...")
-        salida = _salida_intervalo(vendor, iv.ini, iv.fin, parquet_root, usar_cpa=usar_cpa)
-        if salida is None:  # no debería pasar (ya tuvo datos en la pasada 1)
-            continue
-        prepared, _, _ = salida
-        _pegar_totales_globales(prepared, folio_global, inv_global)
+    trozos_detalle: list[Path] = []
+    anios_detalle: set[int] = set()
+    tmp = Path(tempfile.mkdtemp(prefix=f"val_{vendor}_"))
+    try:
+        def _pasada2(etiqueta: str, ini: str, fin: str) -> None:
+            log(f"[pasada 2 · {etiqueta}] re-cruce y escritura del Compras...")
+            salida = _salida_intervalo(vendor, ini, fin, parquet_root, usar_cpa=usar_cpa)
+            if salida is None:  # no debería pasar (ya tuvo datos en la pasada 1)
+                return
+            prepared, _, _ = salida
+            _pegar_totales_globales(prepared, folio_global, inv_global)
 
-        destino = proveedor_dir / f"Compras_{base}_{iv.etiqueta}.xlsx"
-        escribir_libro_compras(destino, prepared, vendor=vendor, start_date=start_date, end_date=end_date)
-        compras_paths.append(destino)
+            # El detalle se guarda ANTES de escribir el Excel a propósito. Así, si el
+            # intervalo no cabe y hay que reintentarlo partido, lo único que puede haber
+            # quedado en disco es el pickle (que `_deshacer_pasada2` borra); un Compras del
+            # trimestre conviviendo con los Compras de sus meses sería datos duplicados en
+            # el entregable, y eso nadie lo nota hasta que alguien suma dos veces.
+            folio = make_folio_series(prepared["strnbr"], prepared["rcvnbr"])
+            trozo = prepared[folio.isin(folios_con_dif)]
+            if not trozo.empty:
+                columnas = [c for c in _COLUMNAS_FUENTE if c in trozo.columns]
+                ligero = trozo[columnas].copy()
+                ligero["folio"] = make_folio_series(ligero["strnbr"], ligero["rcvnbr"])
+                anios_detalle.update(anios_de_compras(ligero))
+                ruta = tmp / f"{etiqueta}.pkl"
+                ligero.to_pickle(ruta)
+                trozos_detalle.append(ruta)
+                del ligero
 
-        folio = make_folio_series(prepared["strnbr"], prepared["rcvnbr"])
-        trozo = prepared[folio.isin(folios_con_dif)]
-        if not trozo.empty:
-            detalle_partes.append(trozo.copy())
-        log(f"                   {destino.name} · {len(trozo):,} renglones de folios con diferencia")
-        del prepared, salida
+            destino = proveedor_dir / f"Compras_{base}_{etiqueta}.xlsx"
+            if reanudar and destino.exists():
+                # El re-cruce es determinista, así que el Compras del disco es idéntico al que
+                # se escribiría. Reusarlo ahorra los ~7 min por trimestre que cuesta volcar un
+                # Excel de 150 MB cuando lo único que falta es la Validación.
+                log(f"                   {destino.name} ya existe · se reusa")
+            else:
+                escribir_libro_compras(
+                    destino, prepared, vendor=vendor, start_date=start_date, end_date=end_date
+                )
+            compras_paths.append(destino)
+            log(f"                   {destino.name} · {len(trozo):,} renglones de folios con diferencia")
+            del prepared, salida, trozo, folio
+            gc.collect()
+
+        def _deshacer_pasada2(etiqueta: str, ini: str, fin: str) -> None:
+            ruta = tmp / f"{etiqueta}.pkl"
+            if ruta in trozos_detalle:
+                trozos_detalle.remove(ruta)
+            ruta.unlink(missing_ok=True)
+            destino = proveedor_dir / f"Compras_{base}_{etiqueta}.xlsx"
+            if destino in compras_paths:
+                compras_paths.remove(destino)
+
+        _recorrer_intervalos(
+            [(iv.etiqueta, iv.ini, iv.fin) for iv in con_datos],
+            _pasada2, log=log, cancelado=cancelado,
+            fase="la pasada 2 de", deshacer=_deshacer_pasada2, piso=PISO_MES,
+        )
+
+        # -- VALIDACIÓN consolidada (mismo escritor que el camino de los gigantes) ------------
+        log("[validación] consolidando...")
+        # Fuente del Consolidado: un renglón por folio. Es chica (un folio por renglón) y sale
+        # de los mismos trozos, así que no hay que releer nada de SQL.
+        src_partes = []
+        for ruta in trozos_detalle:
+            t = pd.read_pickle(ruta)
+            src_partes.append(t.drop_duplicates(subset="folio", keep="first"))
+            del t
+        if src_partes:
+            consolidado_src = pd.concat(src_partes, ignore_index=True).drop_duplicates(
+                subset="folio", keep="first"
+            )
+        else:
+            consolidado_src = pd.DataFrame(columns=COMPRAS_COLUMNS)
+        del src_partes
         gc.collect()
 
-    # -- VALIDACIÓN consolidada (reusa el escritor del camino normal) ------------------------
-    log("[validación] consolidando...")
-    df_dif = (
-        pd.concat(detalle_partes, ignore_index=True)
-        if detalle_partes
-        else pd.DataFrame(columns=COMPRAS_COLUMNS)
-    )
-    validacion_path = proveedor_dir / f"Validacion_{base}.xlsx"
-    write_validation_from_dataframe(df_dif, validacion_path)
-    log(f"[validación] {validacion_path.name}")
+        def _chunks():
+            for ruta in trozos_detalle:
+                yield pd.read_pickle(ruta)
+
+        validacion_path = proveedor_dir / f"Validacion_{base}.xlsx"
+        log(f"[validación] streaming · {len(consolidado_src):,} folios con diferencia")
+        write_validation_streaming(
+            consolidado_src, _chunks(), validacion_path,
+            periodo=formatear_periodo(anios_detalle),
+        )
+        log(f"[validación] {validacion_path.name}")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
 
     # Sin cruce no se copian soportes: el entregable no se apoya en ningun CFDI.
     soportes = (
@@ -212,6 +331,95 @@ def _intervalos_trimestre(start_date: str, end_date: str) -> list[tuple[str, str
     return salida
 
 
+#: Hasta dónde se puede partir un intervalo que no cabe en memoria.
+#:
+#: `"dia"` es para las fases que solo **acumulan** (sus trozos van a un pickle temporal y el
+#: entregable no cambia): ahí partir fino sale gratis y salva la corrida.
+#:
+#: `"mes"` es para las fases que **escriben un archivo por intervalo**. Ahí el piso no es
+#: técnico sino de utilidad: partir al día produciría ~450 `Compras_*.xlsx` de un proveedor y
+#: tardaría días — la corrida "no falla", pero el entregable es inservible. Medido con
+#: PROPIMEX a 2.5 GB el 2026-08-26. Un año en 12-15 archivos sí se puede trabajar.
+PISO_DIA = "dia"
+PISO_MES = "mes"
+
+
+def _subdividir(ini: str, fin: str, piso: str = PISO_DIA) -> list[tuple[str, str, str]]:
+    """Trozos más finos de un intervalo, o `[]` si ya no hay nada más fino que intentar.
+
+    La cadena es trimestre → meses → días, cortada en `piso`. Se devuelve el primer nivel que
+    **de verdad** parta el intervalo en más de un trozo: subdividir un mes en "un mes" sería
+    un bucle infinito reintentando exactamente lo mismo.
+    """
+    niveles = (_intervalos_mes,) if piso == PISO_MES else (_intervalos_mes, _intervalos_dia)
+    for partir in niveles:
+        trozos = partir(ini, fin)
+        if len(trozos) > 1:
+            return trozos
+    return []
+
+
+def _recorrer_intervalos(
+    intervalos: Sequence[tuple[str, str, str]],
+    trabajo: Callable[[str, str, str], None],
+    *,
+    log: Callable[[str], None],
+    cancelado: SenalCancelacion | None = None,
+    fase: str = "",
+    deshacer: Callable[[str, str, str], None] | None = None,
+    piso: str = PISO_DIA,
+) -> None:
+    """Corre `trabajo(etiqueta, ini, fin)` sobre cada intervalo, **degradando la granularidad
+    del que no quepa en memoria**.
+
+    Cuánto cabe en RAM no se puede saber de antemano: depende de la máquina del auditor, de
+    lo que tenga abierto y de cuántos CFDI traiga ese trimestre en la CPA. Elegir el tamaño
+    del trozo con un umbral fijo es adivinar, y equivocarse cuesta la corrida entera. Aquí no
+    se adivina: se intenta el trimestre y, si revienta, se reintenta partido en meses; si un
+    mes tampoco cabe, en días. El proveedor sale igual, solo repartido en más archivos.
+
+    `deshacer(etiqueta, ini, fin)` es la red de seguridad del reintento: el intento fallido
+    pudo dejar efectos a medias (un acumulado ya fundido, un pickle escrito), y los
+    sub-intervalos van a rehacer ese mismo trabajo. Sin deshacerlos primero, los importes se
+    contarían dos veces y la auditoría saldría mal — un fallo peor que el MemoryError,
+    porque no se nota. Quien llama es el único que sabe qué dejó a medias.
+    """
+    for etiqueta, ini, fin in intervalos:
+        revisar(cancelado, f"antes de {fase or 'el intervalo'} {etiqueta}")
+        sin_memoria = False
+        try:
+            trabajo(etiqueta, ini, fin)
+        except MemoryError:
+            # El reintento NO puede ir aquí dentro: mientras corre el `except`, la excepción
+            # viva mantiene su traceback, y el traceback mantiene los frames de `trabajo`
+            # **con sus locals** — o sea el DataFrame que acaba de reventar la memoria.
+            # `gc.collect()` no lo libera porque sigue referenciado, así que el reintento
+            # moriría igual. Se marca la bandera, se sale del handler (ahí muere el
+            # traceback y se libera todo) y se reintenta fuera. Misma trampa documentada en
+            # `pipeline.generar_salida_proveedor`.
+            sin_memoria = True
+        if not sin_memoria:
+            continue
+
+        gc.collect()
+        if deshacer is not None:
+            deshacer(etiqueta, ini, fin)
+        trozos = _subdividir(ini, fin, piso)
+        if not trozos:
+            raise MemoryError(
+                f"El intervalo {etiqueta} ({ini}..{fin}) no cabe en memoria ni partido por "
+                f"{piso}. Cierra otros programas, o corre este proveedor como grande: "
+                "`cpa-validacion-grande` para la Validación (aguanta mucha menos RAM porque "
+                "solo trae los renglones auditables) y `cpa-compras-grande` para los Compras, "
+                "que es resumible."
+            )
+        log(f"      [{etiqueta}] sin memoria · se reintenta en {len(trozos)} trozos más finos")
+        _recorrer_intervalos(
+            trozos, trabajo, log=log, cancelado=cancelado, fase=fase, deshacer=deshacer,
+            piso=piso,
+        )
+
+
 def generar_validacion_grande(
     vendor: str,
     start_date: str,
@@ -247,12 +455,14 @@ def generar_validacion_grande(
         trozos: list[Path] = []
 
         intervalos = _intervalos_mes(start_date, end_date) if por_mes else _intervalos_trimestre(start_date, end_date)
-        for etiqueta, ini, fin in intervalos:
+
+        def _acumular(etiqueta: str, ini: str, fin: str) -> None:
+            nonlocal folio_acc, rfc, base
             log(f"[{etiqueta}] auditables desde SQL + cruce...")
             salida = _salida_intervalo(vendor, ini, fin, parquet_root, filtro_filas=FILTRO_AUDITABLES, usar_cpa=usar_cpa)
             if salida is None:
                 log("           (sin renglones)")
-                continue
+                return
             prepared, rfc, base = salida
             ligero = prepared[[c for c in columnas if c in prepared.columns]].copy()
             del prepared
@@ -263,16 +473,28 @@ def generar_validacion_grande(
                  "pay": to_number(ligero["tot_pagado_ne"]).to_numpy()},
                 index=folio.to_numpy(),
             ).groupby(level=0).agg(imp=("imp", "sum"), pay=("pay", "max"))
-            folio_acc = agg if folio_acc is None else pd.concat([folio_acc, agg]).groupby(level=0).agg(
+            nuevo_acc = agg if folio_acc is None else pd.concat([folio_acc, agg]).groupby(level=0).agg(
                 imp=("imp", "sum"), pay=("pay", "max")
             )
 
+            # `folio_acc` se reasigna hasta DESPUÉS de que el pickle esté en disco: si la
+            # escritura revienta, el acumulado no debe haber absorbido ya este intervalo, o
+            # el reintento partido lo sumaría dos veces y la Validación saldría inflada.
             ruta = tmp / f"{etiqueta}.pkl"
             ligero.to_pickle(ruta)
+            folio_acc = nuevo_acc
             trozos.append(ruta)
             log(f"           {len(ligero):,} auditables · acumulados")
             del ligero, salida
             gc.collect()
+
+        def _deshacer(etiqueta: str, ini: str, fin: str) -> None:
+            ruta = tmp / f"{etiqueta}.pkl"
+            if ruta in trozos:
+                trozos.remove(ruta)
+            ruta.unlink(missing_ok=True)
+
+        _recorrer_intervalos(intervalos, _acumular, log=log, deshacer=_deshacer)
 
         if folio_acc is None or not trozos:
             raise ValueError(f"El proveedor {vendor} no devolvió compras auditables en {start_date}..{end_date}.")
@@ -385,16 +607,18 @@ def generar_compras_grande(
     base = existentes[0].name if existentes else ""
 
     rutas: list[Path] = []
-    for etiqueta, ini, fin in intervalos:
+
+    def _escribir(etiqueta: str, ini: str, fin: str) -> None:
+        nonlocal base
         if base and (output_dir / base / f"Compras_{base}_{etiqueta}.xlsx").exists():
             log(f"[{etiqueta}] ya existe · se salta")
             rutas.append(output_dir / base / f"Compras_{base}_{etiqueta}.xlsx")
-            continue
+            return
 
         salida = _salida_intervalo(vendor, ini, fin, parquet_root, usar_cpa=usar_cpa)  # sin filtro: TODOS los renglones
         if salida is None:
             log(f"[{etiqueta}] sin renglones")
-            continue
+            return
         prepared, _, base = salida
         proveedor_dir = output_dir / base
         proveedor_dir.mkdir(parents=True, exist_ok=True)
@@ -407,6 +631,18 @@ def generar_compras_grande(
         rutas.append(destino)
         del prepared, salida
         gc.collect()
+
+    def _deshacer(etiqueta: str, ini: str, fin: str) -> None:
+        # `escribir_libro_compras` ya borra su propio archivo trunco, así que aquí solo se
+        # retira la ruta de la lista; los sub-intervalos escribirán las suyas.
+        if base:
+            destino = output_dir / base / f"Compras_{base}_{etiqueta}.xlsx"
+            if destino in rutas:
+                rutas.remove(destino)
+
+    # Piso de mes: este camino escribe un Compras por intervalo, y partir al día daría
+    # cientos de archivos. Es resumible, así que un fallo aquí no tira lo ya escrito.
+    _recorrer_intervalos(intervalos, _escribir, log=log, deshacer=_deshacer, piso=PISO_MES)
 
     log(f"Listo: {len(rutas)} archivos de Compras en {output_dir / base if base else output_dir}")
     return rutas
@@ -423,6 +659,17 @@ def _intervalos_mes(start_date: str, end_date: str) -> list[tuple[str, str, str]
         salida.append((f"{cur.year}-{cur.month:02d}", ini.date().isoformat(), fin.date().isoformat()))
         cur = cur + pd.offsets.MonthBegin(1)
     return salida
+
+
+def _intervalos_dia(start_date: str, end_date: str) -> list[tuple[str, str, str]]:
+    """Parte el periodo en días (etiqueta 'YYYY-MM-DD').
+
+    Es el último recurso de `_subdividir`, para el mes que ni así cabe. Un día de compras
+    entra en cualquier máquina; el costo es que el proveedor sale repartido en muchos
+    archivos, que es infinitamente mejor que no salir.
+    """
+    dias = pd.date_range(pd.to_datetime(start_date), pd.to_datetime(end_date), freq="D")
+    return [(d.date().isoformat(), d.date().isoformat(), d.date().isoformat()) for d in dias]
 
 
 def _salida_intervalo(

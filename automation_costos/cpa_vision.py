@@ -114,11 +114,7 @@ def run_manual_session(settings: CPAVisionSettings | None = None) -> list[Path]:
     attached_pages: set[int] = set()
     with sync_playwright() as playwright:
         browser = _launch_browser(playwright, settings)
-        context_kwargs: dict[str, Any] = {"accept_downloads": True, "locale": _BROWSER_LOCALE}
-        if settings.state_path.exists():
-            context_kwargs["storage_state"] = str(settings.state_path)
-        context = browser.new_context(**context_kwargs)
-        context.set_default_timeout(settings.timeout_ms)
+        context = _nuevo_contexto(browser, settings)
 
         def attach_handlers(page) -> None:
             page_id = id(page)
@@ -174,12 +170,7 @@ def open_downloads_page(
     with sync_playwright() as playwright:
         _log_step(f"Abriendo navegador: {settings.browser_channel or 'chromium'}")
         browser = _launch_browser(playwright, settings)
-        context_kwargs: dict[str, Any] = {"accept_downloads": True, "locale": _BROWSER_LOCALE}
-        if settings.state_path.exists():
-            _log_step(f"Reutilizando sesion guardada: {settings.state_path}")
-            context_kwargs["storage_state"] = str(settings.state_path)
-        context = browser.new_context(**context_kwargs)
-        context.set_default_timeout(settings.timeout_ms)
+        context = _nuevo_contexto(browser, settings)
         page = context.new_page()
 
         try:
@@ -246,12 +237,7 @@ def request_download_and_wait(
     with sync_playwright() as playwright:
         _log_step(f"Abriendo navegador: {settings.browser_channel or 'chromium'}")
         browser = _launch_browser(playwright, settings)
-        context_kwargs: dict[str, Any] = {"accept_downloads": True, "locale": _BROWSER_LOCALE}
-        if settings.state_path.exists():
-            _log_step(f"Reutilizando sesion guardada: {settings.state_path}")
-            context_kwargs["storage_state"] = str(settings.state_path)
-        context = browser.new_context(**context_kwargs)
-        context.set_default_timeout(settings.timeout_ms)
+        context = _nuevo_contexto(browser, settings)
         page = context.new_page()
 
         try:
@@ -477,6 +463,11 @@ def request_vendor_master_batch(
                         status = "downloaded_after_recovery" if recovered else "downloaded"
                         error = ""
                         break
+                    except CredencialesInvalidas:
+                        # No se reintenta ni se pasa al siguiente proveedor: TODOS usan las
+                        # mismas credenciales, asi que seguir solo suma accesos fallidos
+                        # contra una cuenta compartida. Se corta el lote entero.
+                        raise
                     except SolicitudSinValores as exc:
                         # Resultado definitivo del portal, no un error: no se reintenta, no se
                         # reinicia el navegador y no se guardan artefactos de depuracion. Se
@@ -590,22 +581,32 @@ def _start_authenticated_downloads_session(
     username: str,
     password: str,
 ):
-    _log_step(f"Abriendo navegador: {settings.browser_channel or 'chromium'}")
+    _log_step(f"Abriendo navegador: {settings.browser_channel or 'chromium'}"
+              f"{' (sin ventana)' if settings.headless else ''}")
     browser = _launch_browser(playwright, settings)
-    context_kwargs: dict[str, Any] = {"accept_downloads": True, "locale": _BROWSER_LOCALE}
-    if settings.state_path.exists():
-        _log_step(f"Reutilizando sesion guardada: {settings.state_path}")
-        context_kwargs["storage_state"] = str(settings.state_path)
-    context = browser.new_context(**context_kwargs)
-    context.set_default_timeout(settings.timeout_ms)
+    habia_sesion = settings.state_path.exists()
+    context = _nuevo_contexto(browser, settings)
     page = context.new_page()
 
-    _log_step(f"Abriendo CPA Vision: {settings.base_url}")
-    page.goto(settings.base_url, wait_until="domcontentloaded")
-    _dismiss_transient_overlays(page)
-    if not _is_empresa_or_downloads_page(page):
-        _login(page, username, password, settings.timeout_ms)
-    _open_descargas(page, settings.timeout_ms)
+    # Todo lo que sigue toca el portal, y si falla ESTE es el unico punto del lote donde el
+    # error escapa sin dejar rastro: los `_save_debug_artifacts` del bucle de proveedores
+    # aun no existen, y el `except` de `request_vendor_master_batch` recibe `page=None`
+    # porque esta funcion nunca llego a devolverla. Sin captura ni HTML no hay forma de
+    # saber que vio el navegador, que es justo lo que hace falta cuando corre sin ventana.
+    try:
+        _log_step(f"Abriendo CPA Vision: {settings.base_url}")
+        page.goto(settings.base_url, wait_until="domcontentloaded")
+        _dismiss_transient_overlays(page)
+        if not _is_empresa_or_downloads_page(page):
+            if habia_sesion:
+                _log_step("La sesion guardada ya no es valida: hay que iniciar sesion de nuevo.")
+            _login(page, username, password, settings.timeout_ms)
+        _open_descargas(page, settings.timeout_ms)
+    except Exception:
+        _log_step(f"Fallo al abrir la sesion. URL actual: {_donde_esta(page)}")
+        _save_debug_artifacts(page, "cpavision_login_error")
+        _close_browser_quietly(browser)
+        raise
     context.storage_state(path=str(settings.state_path))
     return browser, context, page
 
@@ -656,12 +657,7 @@ def wait_for_existing_request_download(
     with sync_playwright() as playwright:
         _log_step(f"Abriendo navegador: {settings.browser_channel or 'chromium'}")
         browser = _launch_browser(playwright, settings)
-        context_kwargs: dict[str, Any] = {"accept_downloads": True, "locale": _BROWSER_LOCALE}
-        if settings.state_path.exists():
-            _log_step(f"Reutilizando sesion guardada: {settings.state_path}")
-            context_kwargs["storage_state"] = str(settings.state_path)
-        context = browser.new_context(**context_kwargs)
-        context.set_default_timeout(settings.timeout_ms)
+        context = _nuevo_contexto(browser, settings)
         page = context.new_page()
 
         try:
@@ -698,10 +694,102 @@ def wait_for_existing_request_download(
             browser.close()
 
 
+def _esperar_formulario_login(page, timeout_ms: int) -> None:
+    """Espera a que el formulario de acceso este REALMENTE en la pagina.
+
+    `page.goto(..., wait_until="domcontentloaded")` vuelve en cuanto llega el HTML, y el
+    portal monta su pantalla de acceso con JavaScript despues: el formulario aparece mas
+    tarde. Sin esta espera, `_fill_first_visible` empieza a buscar de inmediato y agota sus
+    cuatro intentos de 5 s —20 s en total— contra una pagina que todavia no lo tiene.
+
+    Se espera por **cualquier campo de texto visible**, no por uno concreto, a proposito: es
+    la señal minima de que la pantalla de acceso ya se dibujo, y no se casa con la estructura
+    del portal, que no controlamos.
+
+    Sin ventana esto pesa mas que con ventana: no hay nada que mirar, y el fallo llega como
+    "no se encontro el campo requerido", que suena a que el portal cambio cuando en realidad
+    solo no habia terminado de cargar.
+    """
+    try:
+        page.locator("input:visible").first.wait_for(state="visible", timeout=timeout_ms)
+    except Exception as exc:
+        raise RuntimeError(
+            "CPA Vision no mostro el formulario de acceso "
+            f"(esperamos {timeout_ms // 1000} s en {_donde_esta(page)}). "
+            "Si esto ocurre sin ventana pero con ventana funciona, es el modo sin ventana; "
+            "revisa la captura cpavision_login_error.png en la carpeta logs."
+        ) from exc
+
+
+#: Caja de error que el portal (Okta) pinta sobre el formulario cuando el acceso falla.
+#: Se localiza por CLASE y no por texto: el mismo recuadro sirve para varios mensajes
+#: ("Usuario o contraseña incorrectos", "Codigo incorrecto", ...) y el texto puede cambiar.
+_SELECTOR_ERROR_LOGIN = ".okta-form-infobox-error"
+#: Señales de que el acceso SI progreso. Se conservan las dos que ya se usaban.
+_RE_PANTALLA_EMPRESAS = re.compile("seleccionar empresa|descarga masiva", re.IGNORECASE)
+_RE_URL_EMPRESAS = re.compile(r".*(okta/empresas|descarga-masiva/descargas).*")
+
+
+class CredencialesInvalidas(RuntimeError):
+    """El portal rechazo el usuario o la contrasena.
+
+    Es una respuesta **definitiva**, como `SolicitudSinValores`: reintentar no la cambia. Y
+    aqui reintentar ademas es dañino, porque **la cuenta de CPA Vision es compartida** y una
+    tanda de 50 proveedores con dos intentos cada uno son 100 accesos fallidos seguidos, que
+    es como se bloquea una cuenta para todo el equipo.
+    """
+
+
+def _esperar_resultado_login(page, timeout_ms: int) -> None:
+    """Espera a que el acceso se resuelva: pantalla de empresas **o** error de credenciales.
+
+    Antes se esperaba solo el exito —la URL de empresas y, como respaldo, su texto— asi que
+    una contrasena mal escrita costaba los dos tiempos de espera completos (2 min) y salia
+    como `Locator.wait_for: Timeout 60000ms exceeded`, que no dice nada. El portal, en
+    cambio, contesta al instante y con todas las letras.
+
+    Se consulta en un bucle corto en vez de con una espera de Playwright porque hay que
+    vigilar **dos desenlaces a la vez** y quedarse con el primero que ocurra.
+    """
+    limite = time.monotonic() + timeout_ms / 1000
+    while time.monotonic() < limite:
+        if _is_empresa_or_downloads_page(page):
+            return
+        try:
+            if page.get_by_text(_RE_PANTALLA_EMPRESAS).first.is_visible():
+                return
+        except Exception:  # noqa: BLE001 — la pagina puede estar navegando ahora mismo
+            pass
+        try:
+            error = page.locator(_SELECTOR_ERROR_LOGIN).first
+            # Se mira el TEXTO del recuadro, no si esta visible. El recuadro existe siempre
+            # en el formulario de Okta y nace VACIO; el portal le escribe el mensaje solo
+            # cuando el acceso falla, asi que "tiene texto" es la señal exacta. Ademas
+            # `text_content()` lee el DOM aunque el elemento este oculto, lo que permite
+            # probar esto contra el HTML guardado de un fallo real.
+            detalle = (error.count() and error.text_content() or "").strip()
+            if detalle:
+                raise CredencialesInvalidas(
+                    f"CPA Vision rechazo el acceso: {detalle}. Revisa el usuario y la "
+                    "contrasena en Ajustes (el ojo del campo deja verla). No se reintenta: "
+                    "la cuenta es compartida y los accesos fallidos seguidos la bloquean."
+                )
+        except CredencialesInvalidas:
+            raise
+        except Exception:  # noqa: BLE001 — idem
+            pass
+        page.wait_for_timeout(250)
+    raise RuntimeError(
+        f"CPA Vision no llego a la pantalla de empresas tras el acceso ({_donde_esta(page)})."
+    )
+
+
 def _login(page, username: str, password: str, timeout_ms: int) -> None:
     if _is_empresa_or_downloads_page(page):
         return
 
+    _log_step(f"Pantalla de acceso: {_donde_esta(page)}")
+    _esperar_formulario_login(page, timeout_ms)
     _log_step("Llenando usuario")
     _fill_first_visible(
         page,
@@ -737,13 +825,71 @@ def _login(page, username: str, password: str, timeout_ms: int) -> None:
     )
 
     _log_step("Esperando pantalla de empresas")
-    try:
-        page.wait_for_url(re.compile(r".*(okta/empresas|descarga-masiva/descargas).*"), timeout=timeout_ms)
-    except Exception:
-        page.get_by_text(re.compile("seleccionar empresa|descarga masiva", re.IGNORECASE)).wait_for(
-            timeout=timeout_ms
-        )
+    _esperar_resultado_login(page, timeout_ms)
     _dismiss_transient_overlays(page)
+
+
+def _user_agent_sin_marca_headless(browser) -> str | None:
+    """El User-Agent del navegador con la marca `Headless` quitada, o None si no hace falta.
+
+    **CPA Vision responde 403 Forbidden a un navegador sin ventana.** Medido el 2026-09-10
+    contra `https://cpavision.mx/`, sin credenciales, pidiendo solo la pagina de acceso:
+
+    | Variante                                   | HTTP | Titulo            |
+    |--------------------------------------------|------|-------------------|
+    | sin ventana, UA por omision (`HeadlessChrome/152`) | 403  | `403 Forbidden`   |
+    | sin ventana, UA sin `Headless`             | 200  | `Login Cpa Vision`|
+    | con ventana (control)                      | 200  | `Login Cpa Vision`|
+
+    O sea: **el unico factor es el User-Agent**. El navegador con ventana ya manda uno limpio,
+    y por eso las 212 h de descargas historicas nunca vieron este 403. Tambien se probo
+    ocultar `navigator.webdriver` con `--disable-blink-features=AutomationControlled` y **no
+    cambia nada**, asi que no se agrega: el filtro del portal mira la cadena, no la bandera.
+
+    El UA se lee del propio navegador en vez de escribirlo a mano porque una cadena fija
+    envejece con cada version de Edge y volveria a delatarnos. Se lee sobre `about:blank`,
+    sin red.
+    """
+    contexto = browser.new_context()
+    try:
+        ua = contexto.new_page().evaluate("() => navigator.userAgent")
+    except Exception as exc:  # noqa: BLE001 — si no se puede leer, se sigue con el de siempre
+        _log_step(f"No se pudo leer el User-Agent del navegador: {exc}")
+        return None
+    finally:
+        contexto.close()
+    if "Headless" not in ua:
+        return None
+    return (
+        ua.replace("HeadlessChrome/", "Chrome/")
+        .replace("HeadlessEdg/", "Edg/")
+        .replace("Headless", "")
+    )
+
+
+def _nuevo_contexto(browser, settings: CPAVisionSettings):
+    """Contexto del navegador con las opciones comunes a todos los caminos.
+
+    Estaba repetido en los cinco sitios que abren navegador, con el riesgo de que una
+    correccion entrara en unos y no en otros — que es justo lo que habria pasado con el 403.
+
+    **Sin ventana se corrige el User-Agent** (ver `_user_agent_sin_marca_headless`). Con
+    ventana no se toca nada: ese camino lleva 212 h de descargas y no hay motivo para
+    moverlo.
+    """
+    context_kwargs: dict[str, Any] = {"accept_downloads": True, "locale": _BROWSER_LOCALE}
+    if settings.state_path.exists():
+        _log_step(f"Reutilizando sesion guardada: {settings.state_path}")
+        context_kwargs["storage_state"] = str(settings.state_path)
+    if settings.headless:
+        user_agent = _user_agent_sin_marca_headless(browser)
+        if user_agent:
+            context_kwargs["user_agent"] = user_agent
+            _log_step("Sin ventana: se usa el User-Agent del navegador con ventana "
+                      "(el portal responde 403 al de un navegador sin ventana).")
+    contexto = browser.new_context(**context_kwargs)
+    contexto.set_default_timeout(settings.timeout_ms)
+    return contexto
 
 
 def _launch_browser(playwright, settings: CPAVisionSettings):
@@ -1485,6 +1631,19 @@ def _submit_download_request(page, timeout_ms: int) -> str:
 
     _log_step("Esperando confirmacion de solicitud")
     _wait_for_request_confirmation(page, timeout_ms)
+
+    # Caso "ya existe una solicitud identica": el portal NO creo una nueva, pero nos dice el
+    # ID de la que ya tiene en proceso. Se reutiliza esa y se sigue como si la hubieramos
+    # creado nosotros — el trabajo esta encolado y los datos son los mismos (identica = mismo
+    # RFC, mismos años, mismos archivos). Este modal no trae Motivo ni Frecuencia, asi que hay
+    # que salir ANTES de intentar llenarlos.
+    duplicada = _SOLICITUD_DUPLICADA.search(page.locator("body").inner_text(timeout=10_000))
+    if duplicada:
+        request_id = duplicada.group(1)
+        _log_step(f"El portal ya tenia esta solicitud en proceso ({request_id}); se reutiliza.")
+        _cerrar_modal(page)
+        return request_id
+
     request_id = _extract_request_id(page)
     _log_step(f"Solicitud creada: {request_id}")
 
@@ -1501,6 +1660,32 @@ def _submit_download_request(page, timeout_ms: int) -> str:
     )
     page.wait_for_timeout(1_000)
     return request_id
+
+
+def _cerrar_modal(page) -> None:
+    """Cierra el modal abierto, para dejar la pagina navegable. Nunca lanza.
+
+    Se prueban la "X" del encabezado y un boton de cerrar/aceptar; si ninguno aparece se
+    manda Escape. Si aun asi quedara abierto, el paso siguiente navega a Solicitudes y la
+    recarga se lo lleva por delante: por eso esto es un intento, no un requisito.
+    """
+    for abrir in (
+        lambda: page.get_by_role("button", name=re.compile(r"^\s*(×|x|cerrar)\s*$", re.IGNORECASE)),
+        lambda: page.locator("button.close, .modal-header button, [aria-label='Close']"),
+    ):
+        try:
+            control = abrir().first
+            if control.is_visible(timeout=1_500):
+                control.click(timeout=3_000)
+                page.wait_for_timeout(500)
+                return
+        except Exception:  # noqa: BLE001 — cerrar el modal es accesorio
+            continue
+    try:
+        page.keyboard.press("Escape")
+        page.wait_for_timeout(500)
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def _set_request_reason_and_frequency(page) -> None:
@@ -1528,11 +1713,29 @@ def _set_input_checked_by_selector(page, selector: str, checked: bool, descripti
     _log_step(f"Verificado: {description}")
 
 
+#: El portal rechaza una solicitud repetida con "Solicitud fallida - Ya existe una solicitud
+#: identica en proceso ID: NNNNNN". No es un error: nos esta diciendo que el trabajo YA esta
+#: encolado y con que ID seguirlo.
+_SOLICITUD_DUPLICADA = re.compile(
+    r"ya\s+existe\s+una\s+solicitud\s+id[eé]ntica.{0,80}?ID:\s*(\d+)", re.IGNORECASE | re.DOTALL
+)
+
+
 def _wait_for_request_confirmation(page, timeout_ms: int) -> None:
+    """Espera el modal que sigue a "Solicitar descarga", sea de exito o de duplicada.
+
+    El de exito trae `ID: NNNN` **junto con** los campos Motivo y Frecuencia. El de duplicada
+    trae el ID pero NO esos campos, asi que con la condicion original la espera se agotaba a
+    los 60 s y el proveedor se marcaba como error — aunque su solicitud estuviera perfectamente
+    creada en el portal. Paso con PROPIMEX (PRO840423SG8) el 2026-08-25: el intento 1 creo la
+    solicitud 659262, el reintento mando otra identica y el portal la rechazo.
+    """
     page.wait_for_function(
         """
         () => {
             const text = document.body.innerText || "";
+            // Solicitud repetida: el portal ya la tiene en proceso y nos da su ID.
+            if (/ya\\s+existe\\s+una\\s+solicitud\\s+id[eé]ntica/i.test(text)) return true;
             return /ID:\\s*\\d+/i.test(text)
                 && /motivo/i.test(text)
                 && /frecuencia/i.test(text);
@@ -2293,6 +2496,19 @@ def _is_empresa_or_downloads_page(page) -> bool:
 
 def _log_step(message: str) -> None:
     print(f"[CPA Vision] {message}", flush=True)
+
+
+def _donde_esta(page) -> str:
+    """`url · titulo` de la pagina, para la bitacora. Nunca lanza.
+
+    Cuando algo falla sin ventana, esto y la captura son lo unico que dice si el navegador
+    estaba donde creiamos. Un error de "no encontre el campo" en la pagina equivocada se lee
+    muy distinto que el mismo error en la pagina correcta.
+    """
+    try:
+        return f"{page.url} · {page.title()!r}"
+    except Exception:  # noqa: BLE001 — es informacion de apoyo, no puede tumbar el error real
+        return "(no se pudo leer la pagina)"
 
 
 def _save_debug_artifacts(page, name: str) -> None:

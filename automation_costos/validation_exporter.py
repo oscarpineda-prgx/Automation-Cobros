@@ -96,7 +96,11 @@ DETALLE_COLUMNS = [
 
 
 def write_validation_workbook(compras_path: Path, output_path: Path, *, periodo: str = "") -> Path:
-    compras_df = prepare_compras_dataframe(read_compras_workbook(compras_path))
+    # Se lee un Compras de disco, que pudo pasar por manos del auditor: se respetan sus
+    # columnas auditadas en vez de volver a derivarlas del EDI (acuerdo 2026-09-11).
+    compras_df = prepare_compras_dataframe(
+        read_compras_workbook(compras_path), respetar_auditadas=True
+    )
     return write_validation_from_dataframe(compras_df, output_path, periodo=periodo)
 
 

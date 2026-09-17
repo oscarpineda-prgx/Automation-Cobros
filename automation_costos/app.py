@@ -19,6 +19,7 @@ presupuesto de recursos: esto corre en equipos de un solo nucleo.
 from __future__ import annotations
 
 import queue
+import re
 import threading
 from datetime import date, datetime
 from pathlib import Path
@@ -36,7 +37,7 @@ from automation_costos.database import (
     resolver_rfc,
     test_connection,
 )
-from automation_costos.excel_exporter import write_compras_workbook
+from automation_costos.excel_exporter import write_compras_cruzado, write_compras_workbook
 from automation_costos.recalculate import recalculate_compras_file
 from automation_costos.utils import clean_code, safe_filename
 from automation_costos.validation_exporter import write_validation_workbook
@@ -86,6 +87,14 @@ PASOS_PROVEEDOR = (
     ("recalcular", "Recalcular el Compras editado", "_recalcular"),
     ("validar", "Generar Validación de Condiciones", "_validar"),
 )
+
+#: Piezas con las que se reconstruye el `<numero>_<nombre>` del proveedor desde el nombre de
+#: un Compras (ver `base_de_compras`). Los sufijos son los que agrega la propia interfaz al
+#: encadenar pasos; el prefijo y el patron de trozo son la convencion de `pipeline`.
+_PREFIJO_COMPRAS = "Compras_"
+_SUFIJOS_TRABAJO = ("_EDI", "_Recalculado")
+#: `_2020` o `_2020-T3` al final: es un trozo de un proveedor grande, no su Compras completo.
+_RE_TROZO = re.compile(r"_(?:19|20)\d{2}(?:-T[1-4])?$")
 
 _TOKENS_ERROR = ("error", "exception", "traceback")
 _TOKENS_OK = (
@@ -301,11 +310,12 @@ class CostosApp(ctk.CTk):
         ui.rotulo(
             rapido, self.tema,
             titulo="Camino rápido",
-            subtitulo="Compras → cruce con CPA → recálculo → Validación, de corrido y sin intervención",
+            subtitulo="Descarga de CPA → Compras → cruce EDI → recálculo → Validación, de corrido",
         )
         ui.boton_cta(
             rapido, self.tema, texto="▶     GENERAR TODO", comando=self._generar_salida,
-            subtitulo="Usa el proveedor y el periodo de arriba. Necesita el Parquet ya descargado.",
+            subtitulo="Los 5 pasos de un clic. Si el periodo ya está en el Parquet, se salta la "
+                      "descarga y lo dice en la bitácora.",
         )
         ctk.CTkFrame(rapido, fg_color="transparent", height=10).pack()
 
@@ -755,8 +765,14 @@ class CostosApp(ctk.CTk):
         fila.pack(fill="x", padx=14)
         # Credenciales del portal: las teclea el auditor, nunca se guardan en código.
         ui.campo(fila, self.tema, etiqueta="Usuario", variable=self.cpa_usuario, ancho=200)
-        ui.campo(fila, self.tema, etiqueta="Contraseña", variable=self.cpa_password,
-                 ancho=200, show="*")
+        ui.campo_secreto(fila, self.tema, etiqueta="Contraseña", variable=self.cpa_password,
+                         ancho=200)
+        ui.pista(
+            card,
+            self.tema,
+            f"Mantén pulsado {ui.OJO} para ver la contraseña mientras la escribes; "
+            "se vuelve a ocultar al soltar.",
+        )
         fila_modo = ctk.CTkFrame(card, fg_color="transparent")
         fila_modo.pack(fill="x", padx=14)
         ui.casilla(
@@ -1075,7 +1091,7 @@ class CostosApp(ctk.CTk):
 
         def tarea() -> None:
             df = fetch_compras(proveedor, inicio, fin)
-            salida = self._ruta_salida(_nombre_compras(df, proveedor))
+            salida = self._ruta_en_carpeta_proveedor(_nombre_compras(df, proveedor))
             write_compras_workbook(df, salida, vendor=proveedor, start_date=inicio, end_date=fin)
             self._fijar_compras(str(salida))
             self._log(f"Compras preliminar generado: {salida}")
@@ -1089,12 +1105,36 @@ class CostosApp(ctk.CTk):
             return
 
         def tarea() -> None:
-            salida = self._ruta_salida(f"{entrada.stem}_Recalculado.xlsx")
+            salida = self._junto_a(entrada, f"{entrada.stem}_Recalculado.xlsx")
             recalculate_compras_file(entrada, salida)
             self._fijar(self.archivo_recalculado, str(salida))
             self._log(f"Compras recalculado generado: {salida}")
 
         self._ejecutar("recalcular", "Recalculando archivo de compras...", tarea)
+
+    def _destino_validacion(self, entrada: Path) -> tuple[Path, bool]:
+        """Dónde escribir la Validación de `entrada`, y si esa ruta es la del entregable.
+
+        El reporte de control de Héctor **solo reconoce** las Validaciones que viven en
+        `<raiz>/<numero>_<nombre>/Validacion_<numero>_<nombre>.xlsx`; cualquier otra la
+        ignora a propósito, para que un archivo suelto no siembre cifras donde no van
+        (`reporte_diferencias.actualizar_desde_validacion`). Hasta ahora la interfaz escribía
+        siempre suelto —`<stem>_Validacion_Condiciones.xlsx` en la raíz de salida— y por eso
+        una corrección hecha desde aquí nunca llegaba al reporte.
+
+        Cuando se puede deducir de qué proveedor es el Compras, se escribe **en su sitio**,
+        que es donde `cpa-salida` lo habría puesto. Cuando no (un archivo con otro nombre, o
+        el trozo de un proveedor grande), se conserva el comportamiento de siempre: archivo
+        suelto y sin tocar el reporte. Es preferible no actualizar a actualizar con un número
+        parcial.
+        """
+        base = base_de_compras(entrada)
+        if not base:
+            return self._ruta_salida(f"{entrada.stem}_Validacion_Condiciones.xlsx"), False
+        # Si el archivo ya vive en la carpeta de su proveedor, esa manda: el auditor pudo
+        # abrirlo desde otra raíz de entregables distinta a la configurada en Ajustes.
+        carpeta = entrada.parent if entrada.parent.name == base else self._ruta_salida(base)
+        return carpeta / f"Validacion_{base}.xlsx", True
 
     def _validar(self) -> None:
         ruta = self._archivo_para_validar()
@@ -1104,17 +1144,60 @@ class CostosApp(ctk.CTk):
         if not ruta:
             return
         entrada = Path(ruta)
+        destino, canonico = self._destino_validacion(entrada)
+
+        # Sobrescribir el entregable es lo correcto —el auditor acaba de corregirlo— pero
+        # nunca en silencio: es el archivo que ya se le pudo haber mandado al proveedor.
+        if canonico and destino.exists() and not messagebox.askyesno(
+            "Actualizar el entregable",
+            f"Ya existe la Validación de este proveedor:\n\n{destino}\n\n"
+            "Se va a reemplazar con la que se genere ahora, y el reporte consolidado de "
+            "diferencias se actualizará con las cifras nuevas.\n\n¿Continuar?",
+        ):
+            self._log("Validación cancelada: no se reemplazó el entregable existente.")
+            return
+
         # Se deja escrito en la bitacora el archivo exacto que se validó: si mas tarde hay
         # dudas sobre un entregable, aqui esta de que Compras salio.
         self._log(f"Validando sobre: {entrada.name}")
+        if not canonico:
+            self._log(
+                "Aviso: no se pudo deducir a qué proveedor pertenece este archivo, así que la "
+                "Validación se escribe suelta y NO entra al reporte consolidado."
+            )
 
         def tarea() -> None:
-            salida = self._ruta_salida(f"{entrada.stem}_Validacion_Condiciones.xlsx")
-            write_validation_workbook(entrada, salida)
-            self._fijar(self.archivo_validacion, str(salida))
-            self._log(f"Validación generada: {salida}")
+            destino.parent.mkdir(parents=True, exist_ok=True)
+            write_validation_workbook(entrada, destino)
+            self._fijar(self.archivo_validacion, str(destino))
+            self._log(f"Validación generada: {destino}")
+            if canonico:
+                self._actualizar_reporte(destino)
 
         self._ejecutar("validar", "Generando Validación de Condiciones...", tarea)
+
+    def _actualizar_reporte(self, validacion: Path) -> None:
+        """Refresca el reporte consolidado de diferencias tras escribir una Validación.
+
+        Se importa aquí y no arriba para no pagar pandas/xlsxwriter en el arranque de la
+        interfaz, que corre en equipos de un solo núcleo. **Nunca puede tumbar el paso**: la
+        Validación ya está en disco y es lo que importa; el reporte se puede regenerar solo
+        en la siguiente corrida o a mano con `scripts/reporte_diferencias.py`.
+        """
+        from automation_costos.reporte_diferencias import actualizar_desde_validacion
+
+        try:
+            destino = actualizar_desde_validacion(validacion, log=self._log)
+        except Exception as exc:  # noqa: BLE001 — el entregable ya está escrito
+            self._log(f"No se pudo actualizar el reporte de diferencias: {exc}")
+            return
+        if destino:
+            self._log(f"✓ Reporte consolidado de diferencias actualizado: {destino.name}")
+        else:
+            self._log(
+                "El reporte consolidado no se actualizó: la Validación no quedó en la "
+                "estructura de entregables que el reporte reconoce."
+            )
 
     def _descargar_cpa(self) -> None:
         proveedor = self.proveedor.get().strip()
@@ -1168,6 +1251,16 @@ class CostosApp(ctk.CTk):
         self._ejecutar("descarga", "Descargando de CPA Vision (abre el portal)...", tarea)
 
     def _generar_salida(self) -> None:
+        """El flujo COMPLETO de un proveedor, de un clic: descarga incluida.
+
+        Los cinco pasos de la lista en orden: resolver el RFC, bajar los CFDI de CPA Vision,
+        generar el Compras, cruzar el bloque EDI y producir la Validación.
+
+        **La descarga se omite si el Parquet ya cubre todos los años del periodo.** Volver a
+        pedirlos costaría ~8 min por proveedor y el portal encola por usuario, así que
+        repetirlo no aporta nada; se dice en la bitácora para que no parezca que se saltó un
+        paso. Para forzarla, está el paso 2 por separado.
+        """
         proveedor = self.proveedor.get().strip()
         inicio = self.fecha_inicial.get().strip()
         fin = self.fecha_final.get().strip()
@@ -1179,18 +1272,88 @@ class CostosApp(ctk.CTk):
             messagebox.showerror("Ruta inválida", f"No existe la carpeta Parquet:\n{parquet}")
             return
 
+        # Se capturan aqui, en el hilo de Tk: el hilo de fondo no puede tocar widgets.
+        usuario, password = self.cpa_usuario.get().strip(), self.cpa_password.get()
+        rfc_forzado = self.rfc.get().strip().upper()
+        descargas = self.carpeta_cpa.get().strip() or None
+        sin_ventana = bool(self.cpa_sin_ventana.get())
+        salida = self.carpeta_salida.get().strip() or config.OUTPUT_DIR
+
         def tarea() -> None:
             from automation_costos.pipeline import generar_salida_proveedor
 
+            rfc = rfc_forzado
+            if not rfc:
+                self._log("[1/3] Resolviendo el RFC del proveedor en SQL Server...")
+                rfc = resolver_rfc(proveedor, inicio, fin)
+                if not rfc:
+                    raise RuntimeError(
+                        f"No se pudo resolver el RFC de {proveedor}: ¿no tiene compras "
+                        f"entre {inicio} y {fin}?"
+                    )
+                self._fijar(self.rfc, rfc)
+            self._log(f"      RFC: {rfc}")
+
+            faltan = self._anios_sin_parquet(rfc, inicio, fin, parquet)
+            if faltan:
+                if not (usuario and password):
+                    raise RuntimeError(
+                        f"Faltan en el Parquet los años {faltan} de {rfc}. Captura el usuario "
+                        "y la contraseña de CPA Vision en Ajustes para descargarlos."
+                    )
+                self._log(f"[2/3] Descargando de CPA Vision (faltan los años {faltan})...")
+                from automation_costos.cpa_descarga import descargar_cpa_proveedor
+                from automation_costos.cpa_vision import SolicitudSinValores
+
+                try:
+                    bajado = descargar_cpa_proveedor(
+                        rfc, inicio, fin,
+                        parquet_root=parquet,
+                        username=usuario,
+                        password=password,
+                        download_dir=descargas,
+                        log=self._log,
+                        headless=sin_ventana,
+                        cancelado=self._cancelacion.is_set,
+                    )
+                    self._log(f"      {bajado.filas:,} filas listas en el Parquet.")
+                except SolicitudSinValores:
+                    # "Sin valores" NO es un fallo: el portal confirmo que ese RFC no tiene
+                    # CFDI en el periodo. Es la misma regla que aplica la cola por lotes
+                    # (ver `cola_descarga.TERMINADOS`). Abortar aqui dejaria al auditor sin
+                    # entregable por un dato que simplemente no existe — y con el periodo
+                    # por omision, que llega a 2026, es un caso de todos los dias.
+                    self._log(
+                        "      El portal responde «Sin valores»: no hay CFDI de ese RFC en el "
+                        "periodo. Se continúa con lo que ya está en el Parquet."
+                    )
+            else:
+                self._log("[2/3] CPA Vision: el periodo completo ya está en el Parquet, no se descarga.")
+
+            self._log("[3/3] Compras → cruce EDI → recálculo → Validación...")
             resultado = generar_salida_proveedor(
-                proveedor, inicio, fin, parquet, self.carpeta_salida.get().strip() or config.OUTPUT_DIR,
-                log=self._log,
+                proveedor, inicio, fin, parquet, salida, log=self._log,
+                cancelado=self._cancelacion.is_set,
             )
             self._fijar_compras(str(resultado.compras_path))
             self._fijar(self.archivo_validacion, str(resultado.validacion_path))
-            self._log(f"✓ Validación lista: {resultado.validacion_path}")
+            self._log(f"✓ Compras   : {resultado.compras_path}")
+            self._log(f"✓ Validación: {resultado.validacion_path}")
 
-        self._ejecutar("salida", "Generando salida completa...", tarea)
+        self._ejecutar("salida", "Flujo completo: CPA Vision → Compras → Validación...", tarea)
+
+    def _anios_sin_parquet(self, rfc: str, inicio: str, fin: str, parquet: Path) -> list[int]:
+        """Años del periodo que todavía no están descargados, en orden.
+
+        El dataset está particionado como `rfc=<RFC>/year=<AAAA>`, así que basta con mirar
+        si existe la carpeta: no hay que abrir ni un archivo.
+        """
+        try:
+            desde, hasta = int(inicio[:4]), int(fin[:4])
+        except ValueError:
+            return []
+        raiz = Path(parquet) / f"rfc={rfc.strip().upper()}"
+        return [a for a in range(desde, hasta + 1) if not (raiz / f"year={a}").exists()]
 
     def _cruzar_cpa(self) -> None:
         parquet = Path(self.carpeta_parquet.get().strip())
@@ -1235,8 +1398,8 @@ class CostosApp(ctk.CTk):
                 log=self._log,
             )
 
-            salida = self._ruta_salida(f"{entrada.stem}_EDI.xlsx")
-            resultado.df.to_excel(salida, index=False)
+            salida = self._junto_a(entrada, f"{entrada.stem}_EDI.xlsx")
+            write_compras_cruzado(resultado.df, salida)
             self._fijar_compras(str(salida))
             self._log(f"Salida: {salida}")
 
@@ -1312,6 +1475,34 @@ class CostosApp(ctk.CTk):
         carpeta = Path(self.carpeta_salida.get().strip() or config.OUTPUT_DIR)
         carpeta.mkdir(parents=True, exist_ok=True)
         return carpeta / nombre
+
+    def _ruta_en_carpeta_proveedor(self, nombre_archivo: str) -> Path:
+        """Ruta de un archivo DENTRO de la carpeta de su proveedor, creándola si hace falta.
+
+        Cada proveedor es un paquete autocontenido —`<salida>/<numero>_<nombre>/`— y así lo
+        produce «GENERAR TODO». El paso a paso escribía suelto en la raíz de la carpeta de
+        salida, de modo que el mismo proveedor terminaba repartido en dos sitios según por
+        qué camino se hubiera trabajado, y la raíz se llenaba de archivos sueltos.
+
+        Si el nombre no permite deducir el proveedor (ver `base_de_compras`), se cae a la
+        raíz: es preferible escribir suelto que inventar una carpeta con un nombre inventado.
+        """
+        base = base_de_compras(Path(nombre_archivo))
+        if not base:
+            return self._ruta_salida(nombre_archivo)
+        carpeta = self._ruta_salida(base)
+        carpeta.mkdir(parents=True, exist_ok=True)
+        return carpeta / nombre_archivo
+
+    @staticmethod
+    def _junto_a(entrada: Path, nombre_archivo: str) -> Path:
+        """Ruta hermana de `entrada`. Los pasos intermedios se quedan donde está su origen.
+
+        Es lo que mantiene junto el trabajo de un proveedor sin que cada paso tenga que
+        recalcular a qué carpeta pertenece: si el Compras vive en la carpeta del proveedor,
+        su cruce y su recálculo nacen ahí mismo.
+        """
+        return entrada.parent / nombre_archivo
 
     def _detener(self) -> None:
         """Pide detener la operación en curso (cancelación cooperativa).
@@ -1397,6 +1588,40 @@ def _estado_visible(trabajo: cola_descarga.Trabajo) -> tuple[str, str]:
 
 def run_app() -> None:
     CostosApp().mainloop()
+
+
+def base_de_compras(compras: Path) -> str:
+    """El `<numero>_<nombre>` del proveedor a partir del nombre de su Compras.
+
+    Es la llave de toda la estructura de entregables: la carpeta se llama asi y dentro van
+    `Compras_<base>.xlsx` y `Validacion_<base>.xlsx` (ver `pipeline._nombre_base`). Aqui se
+    recorre el camino inverso, porque en el flujo paso a paso de la interfaz el auditor llega
+    con el archivo que traia en la mano —posiblemente ya cruzado o recalculado— y no con el
+    numero de proveedor.
+
+    Devuelve cadena vacia cuando el archivo **no** representa al proveedor completo. Son dos
+    casos y los dos importan:
+
+    - No se llama `Compras_...`: es otra cosa, no hay de donde deducir el proveedor.
+    - Trae sufijo de año o trimestre (`_2020`, `_2020-T3`): es **un trozo** de un proveedor
+      grande, no su Compras entero. Tratarlo como completo produciria una Validacion parcial
+      escrita encima del entregable bueno, que es justo el error que no se puede permitir.
+    """
+    stem = compras.stem
+    # El auditor puede encadenar pasos: Compras_X -> Compras_X_EDI -> Compras_X_EDI_Recalculado.
+    cambio = True
+    while cambio:
+        cambio = False
+        for sufijo in _SUFIJOS_TRABAJO:
+            if stem.endswith(sufijo):
+                stem = stem[: -len(sufijo)]
+                cambio = True
+    if not stem.startswith(_PREFIJO_COMPRAS):
+        return ""
+    base = stem[len(_PREFIJO_COMPRAS) :]
+    if _RE_TROZO.search(base):
+        return ""
+    return base
 
 
 def _nombre_compras(df, proveedor: str) -> str:

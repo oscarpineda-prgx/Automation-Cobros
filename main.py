@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import argparse
+import os
+import sys
+import traceback
 from pathlib import Path
 
 from automation_costos.database import fetch_compras
-from automation_costos.excel_exporter import write_compras_workbook
+from automation_costos.excel_exporter import write_compras_cruzado, write_compras_workbook
 from automation_costos.recalculate import recalculate_compras_file
 from automation_costos.validation_exporter import write_validation_workbook
 
@@ -111,11 +114,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     cpa_batch = sub.add_parser(
         "cpa-batch-vendors",
-        help="Procesa proveedores de vendor_master_fechas.xlsx por lotes en CPA Vision",
+        help="Procesa proveedores de datos/referencias/vendor_master_fechas.xlsx por lotes en CPA Vision",
     )
     cpa_batch.add_argument(
         "--input",
-        default="vendor_master_fechas.xlsx",
+        default="datos/referencias/vendor_master_fechas.xlsx",
         help="Excel con columnas RFC y FECHAS",
     )
     cpa_batch.add_argument("--url", default=None, help="URL de CPA Vision")
@@ -192,6 +195,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="Años que van al entregable. Recorta los renglones a estos años y los anuncia "
              "en el titulo. Sirve cuando la planeacion pide años salteados (2020 2022 2025)",
     )
+    cpa_salida.add_argument(
+        "--por-mes", action="store_true",
+        help="Partir por mes en vez de trimestre desde el arranque. No suele hacer falta: "
+             "el trimestre que no quepa en memoria se parte solo",
+    )
+    cpa_salida.add_argument(
+        "--reanudar", action="store_true",
+        help="Reusa los Compras_*.xlsx que ya esten en la carpeta en vez de reescribirlos. "
+             "Para retomar un proveedor grande que murio despues de escribirlos",
+    )
 
     cpa_val = sub.add_parser(
         "cpa-validacion-grande",
@@ -228,10 +241,103 @@ def build_parser() -> argparse.ArgumentParser:
     exc_report.add_argument("--output", required=True, help="Excel de salida (Exception Report)")
 
     sub.add_parser("gui", help="Abre la interfaz grafica")
+    sub.add_parser(
+        "autocomprobar",
+        help="Verifica que el empaquetado esta completo (lo usa el build). No abre la interfaz",
+    )
+
     return parser
 
 
+#: Lo que hay que poder importar para que la aplicacion arranque de verdad.
+#:
+#: `--help` de un subcomando NO prueba nada de esto: no toca la interfaz. Por eso el .exe
+#: del 2026-09-10 paso la verificacion del build y luego murio al abrirlo en la maquina de
+#: un auditor, con "cannot import name '_imaging' from 'PIL'" — a PyInstaller se le habian
+#: quedado fuera las extensiones C de Pillow.
+#:
+#: Se importan por su nombre y no como cadena suelta porque el fallo tipico del empaquetado
+#: es justo ese: el modulo Python viaja y su extension en C no.
+_IMPORTES_CRITICOS = (
+    ("automation_costos.app", "la interfaz grafica"),
+    ("PIL.Image", "las imagenes del encabezado"),
+    ("PIL._imaging", "el motor de imagenes (extension C de Pillow)"),
+    ("customtkinter", "los controles de la ventana"),
+    ("pandas", "el calculo"),
+    ("duckdb", "la lectura del acervo de CPA Vision"),
+    ("pyarrow.parquet", "el formato del acervo"),
+    ("xlsxwriter", "la escritura de Excel grandes"),
+    ("openpyxl", "la lectura de Excel"),
+    ("playwright.sync_api", "la descarga del portal"),
+)
+
+
+def _autocomprobar() -> None:
+    """Importa todo lo que la aplicacion necesita al arrancar y reporta que falta.
+
+    Existe para que un empaquetado incompleto se detecte **en el build**, no en la maquina
+    del auditor. Se puede correr tambien a mano si la aplicacion no abre:
+
+        AutomationCostos.exe autocomprobar
+    """
+    import importlib
+
+    fallos = []
+    for modulo, para_que in _IMPORTES_CRITICOS:
+        try:
+            importlib.import_module(modulo)
+            print(f"  OK    {modulo:28} {para_que}")
+        except Exception as exc:  # noqa: BLE001 — se reportan todos, no solo el primero
+            fallos.append((modulo, exc))
+            print(f"  FALLA {modulo:28} {para_que}  ->  {exc}")
+
+    if fallos:
+        print(f"\nFaltan {len(fallos)} pieza(s): el paquete esta incompleto.")
+        raise SystemExit(1)
+    print(f"\nAutocomprobacion correcta: {len(_IMPORTES_CRITICOS)} piezas presentes.")
+
+
+def _asegurar_salida_estandar() -> None:
+    """Deja `sys.stdout`/`sys.stderr` usables, en UTF-8 y linea a linea.
+
+    **La cola por lotes lanza este mismo ejecutable como subproceso** y le entrega un archivo
+    de log en los descriptores 1 y 2. Ese log es lo unico que queda cuando un proveedor falla,
+    asi que tiene que salir legible. Hay tres cosas que arreglar, y las tres se vieron en el
+    .exe compilado del 2026-08-24:
+
+    1. **Pueden venir en `None`.** El .exe se compila sin consola (`console=False`) y en ese
+       modo PyInstaller puede anularlos; el primer `print()` reventaria con `AttributeError`
+       y el proveedor quedaria marcado como fallido sin que el log dijera por que.
+    2. **La codificacion.** Por omision el hijo escribe en la ANSI de Windows (cp1252) y el
+       log se lee como UTF-8: cada acento sale como `?`. Los mensajes son en español, o sea
+       casi todas las lineas.
+    3. **El buffer.** Redirigido a un archivo, `stdout` usa buffer de bloque y se vacia al
+       terminar, **despues** de que `stderr` ya escribio el traceback: el log queda al reves,
+       con el error arriba y los pasos que llevaron a el abajo.
+    """
+    for nombre, descriptor in (("stdout", 1), ("stderr", 2)):
+        flujo = getattr(sys, nombre, None)
+        if flujo is not None:
+            # Existe: basta con corregirle codificacion y buffer.
+            try:
+                flujo.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
+                continue
+            except (AttributeError, OSError):
+                pass  # no es un flujo de texto reconfigurable; se reabre abajo
+        try:
+            flujo = open(
+                descriptor, "w", encoding="utf-8", errors="replace",
+                buffering=1, closefd=False,
+            )
+        except OSError:
+            # Ni siquiera hay descriptor: la aplicacion se abrio a mano, con doble clic.
+            flujo = open(os.devnull, "w", encoding="utf-8")
+        setattr(sys, nombre, flujo)
+
+
 def main() -> None:
+    if getattr(sys, "frozen", False):
+        _asegurar_salida_estandar()
     parser = build_parser()
     args = parser.parse_args()
 
@@ -239,6 +345,29 @@ def main() -> None:
         from automation_costos.app import run_app
 
         run_app()
+        return
+
+    # Un subcomando NUNCA debe dejar escapar una excepcion.
+    #
+    # El .exe se compila sin consola, y ahi el bootloader de PyInstaller atiende cualquier
+    # excepcion no atrapada abriendo un **cuadro de dialogo modal** con el traceback. En un
+    # doble clic eso es util; como subproceso de la cola es un desastre: el hijo se queda
+    # esperando un clic que nadie va a dar, y una tanda nocturna se cuelga entera en el
+    # primer proveedor que falle. Se vio con el .exe del 2026-08-25.
+    #
+    # Atrapando aqui, el error se escribe en el log del proveedor —que es donde se busca— y
+    # el proceso sale con codigo 1, que es lo que `ejecutor.ejecutar` ya sabe interpretar.
+    # El dialogo se conserva para el arranque de la interfaz, donde si tiene sentido.
+    try:
+        _despachar(args)
+    except Exception:
+        traceback.print_exc()
+        raise SystemExit(1)
+
+
+def _despachar(args: argparse.Namespace) -> None:
+    if args.command == "autocomprobar":
+        _autocomprobar()
         return
 
     if args.command == "extract":
@@ -269,6 +398,7 @@ def main() -> None:
             usar_cpa=not args.sin_cpa,
             anios_cruce=set(args.cruzar_anios) if args.cruzar_anios else None,
             anios=set(args.anios) if args.anios else None,
+            reanudar=args.reanudar, por_mes=args.por_mes,
         )
         print(f"\nRFC: {resultado.rfc}")
         print(f"Carpeta   : {resultado.proveedor_dir}")
@@ -331,7 +461,10 @@ def main() -> None:
                 origen="cruce manual (terminal)",
             )
         )
-        resultado.df.to_excel(Path(args.output), index=False)
+        # Se escribe como un Compras COMPLETO, no con `to_excel`: el archivo tiene que poder
+        # releerse con `recalc` y `validate`, y esos buscan los encabezados en la fila 7 y
+        # las hojas "Compras <año>". Ver `write_compras_cruzado`.
+        write_compras_cruzado(resultado.df, Path(args.output), vendor=proveedor or None)
         print(f"\nSalida: {args.output}")
         return
 

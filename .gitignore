@@ -10,3 +10,6 @@ build/
 !AutomationCostos.spec
 logs/
 outputs/
+
+# Salidas de la prueba del ejecutable, como outputs/ y logs/.
+prueba_exe/

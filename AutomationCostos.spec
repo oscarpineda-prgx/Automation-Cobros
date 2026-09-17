@@ -5,6 +5,21 @@ from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 # estatico no los detecta, asi que se recolectan explicitamente.
 _hidden = collect_submodules("automation_costos")
 
+# Pillow: hay que pedir sus modulos EXPLICITAMENTE o el .exe no abre la interfaz.
+#
+# `PIL/Image.py` importa su extension en C dentro de un `try/except ImportError`
+# (`from . import _imaging as core`), y el analisis estatico de PyInstaller no la arrastra.
+# El resultado es silencioso y enga~noso: los ~76 modulos Python de PIL SI viajan en el
+# paquete, pero ninguna de sus 8 extensiones C, asi que `Image.py` se carga y muere en esa
+# linea con "cannot import name '_imaging' from 'PIL'". Paso el 2026-09-10 en la maquina
+# de un auditor, con el .exe recien compilado.
+#
+# `collect_dynamic_libs("PIL")` NO sirve aqui: solo busca .dll y no .pyd, porque las
+# extensiones de Python se supone que las descubre el grafo de imports. `collect_submodules`
+# si las lista (PIL._imaging, PIL._imagingft, PIL._webp, ...) y al declararlas como
+# hiddenimports PyInstaller las recoge como binarios.
+_hidden += collect_submodules("PIL")
+
 # customtkinter carga sus temas JSON y sus imagenes en tiempo de ejecucion desde
 # el directorio del paquete: hay que incluirlos como datos.
 _datas = collect_data_files("customtkinter")
@@ -45,7 +60,12 @@ exe = EXE(
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=True,
+    # upx=False a proposito: UPX comprime las DLL y los .pyd, y es una causa conocida de
+    # extensiones de Python que dejan de cargar, ademas de falsos positivos de antivirus en
+    # equipos corporativos. Hoy no esta instalado y PyInstaller lo omite en silencio, asi
+    # que dejarlo en True solo significa que el binario saldria distinto segun la maquina
+    # donde se compile. Se fija en False para que el resultado sea el mismo siempre.
+    upx=False,
     console=False,
     disable_windowed_traceback=False,
     argv_emulation=False,
@@ -60,7 +80,7 @@ coll = COLLECT(
     a.binaries,
     a.datas,
     strip=False,
-    upx=True,
+    upx=False,
     upx_exclude=[],
     name="AutomationCostos",
 )

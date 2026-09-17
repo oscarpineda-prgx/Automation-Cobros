@@ -140,7 +140,9 @@ COMPRAS_COLUMNS = [
 _AUX_COLUMNS = ("folio", "concepto")
 
 
-def prepare_compras_dataframe(df: pd.DataFrame, *, en_sitio: bool = False) -> pd.DataFrame:
+def prepare_compras_dataframe(
+    df: pd.DataFrame, *, en_sitio: bool = False, respetar_auditadas: bool = False
+) -> pd.DataFrame:
     """Deja el DataFrame listo para el Compras: recalculado y con las 105 columnas en orden.
 
     Con `en_sitio=True` esta función **toma posesión** del DataFrame recibido y lo muta;
@@ -164,7 +166,7 @@ def prepare_compras_dataframe(df: pd.DataFrame, *, en_sitio: bool = False) -> pd
 
     # recalculate_dataframe ya hace normalize_date_columns + add_derived_base_columns;
     # no hace falta repetirlos aqui (eran bucles por fila corriendo dos veces).
-    df = recalculate_dataframe(df, en_sitio=True)
+    df = recalculate_dataframe(df, en_sitio=True, respetar_auditadas=respetar_auditadas)
 
     faltantes = [column for column in COMPRAS_COLUMNS if column not in df.columns]
     for column in faltantes:
@@ -199,7 +201,49 @@ def add_derived_base_columns(df: pd.DataFrame, *, en_sitio: bool = False) -> pd.
     return df
 
 
-def recalculate_dataframe(df: pd.DataFrame, *, en_sitio: bool = False) -> pd.DataFrame:
+#: Las tres columnas que **edita el auditor**. Acordado con Mónica el 2026-09-11.
+#:
+#: El auditor NO corrige el bloque EDI: eso viene del sistema y de CPA Vision, se rellena y
+#: se deja tal cual. Lo que corrige es el resultado auditado —costo, IVA e IEPS—, y de ahí
+#: hacia abajo (`imp_aud` … `dif_det_inv`) todo se vuelve a calcular a partir de lo que él
+#: dejó escrito.
+COLUMNAS_AUDITOR = ("cto_aud", "iva_aud", "ieps_aud")
+
+
+def _valor_del_auditor(df: pd.DataFrame, columna: str, valor_regla) -> pd.Series:
+    """Lo que escribió el auditor en `columna`; donde no escribió nada, manda la regla.
+
+    La presencia se mide con `_presente`, **no** con "distinto de cero": un `iva_aud = 0`
+    es una corrección legítima (producto exento) y tiene que respetarse. Si se midiera por
+    valor, poner 0 a mano equivaldría a no haber escrito nada y la regla lo pisaría.
+
+    Que el hueco caiga en la regla en vez de quedar en nulo es deliberado: una celda que el
+    auditor borre no puede propagar un `NaN` a `imp_aud` y de ahí a la diferencia del folio.
+    """
+    regla = pd.Series(valor_regla, index=df.index)
+    if columna not in df.columns:
+        return regla
+    escrito = to_number(df[columna])
+    return escrito.where(_presente(df, columna) & escrito.notna(), regla)
+
+
+def recalculate_dataframe(
+    df: pd.DataFrame, *, en_sitio: bool = False, respetar_auditadas: bool = False
+) -> pd.DataFrame:
+    """Recalcula el Compras.
+
+    `respetar_auditadas` decide de dónde salen `cto_aud`, `iva_aud` e `ieps_aud`:
+
+    - **False** (por omisión) — se **derivan** del bloque EDI con la regla del costo
+      auditado (§3 de LOGICA_NEGOCIO). Es lo correcto cuando el DataFrame acaba de salir de
+      SQL o del cruce con CPA Vision: ahí no hay criterio humano que preservar.
+    - **True** — se **respeta lo que traiga el archivo**, porque lo escribió el auditor. Lo
+      usan la relectura del Compras editado y la Validación. Sin esto, el recálculo pisaba
+      la corrección del auditor con el valor derivado y su trabajo se perdía en silencio.
+
+    En los dos casos, de `imp_aud` hacia abajo se recalcula **siempre**: ese bloque es
+    resultado, nunca entrada.
+    """
     if not en_sitio:
         df = df.copy()
     df = normalize_date_columns(df)
@@ -222,11 +266,19 @@ def recalculate_dataframe(df: pd.DataFrame, *, en_sitio: bool = False) -> pd.Dat
     cruzo_cpa = _presente(df, "uuid") | _presente(df, "ctonto_edi")
     # cto_aud: el menor de los dos, pero nunca cero. Si cruzó y el costo del CFDI es válido
     # (>0) y menor al del sistema, gana el del CFDI; en cualquier otro caso, ctouni.
-    df["cto_aud"] = np.where(
-        cruzo_cpa & ctonto_edi.gt(0) & ctonto_edi.lt(ctouni), ctonto_edi, ctouni
-    ).round(4)
-    df["iva_aud"] = np.where(cruzo_cpa, poriva_edi, iva_t007s).round(6)
-    df["ieps_aud"] = np.where(cruzo_cpa, prieps_edi, ieps_t007s).round(6)
+    regla_cto = np.where(cruzo_cpa & ctonto_edi.gt(0) & ctonto_edi.lt(ctouni), ctonto_edi, ctouni)
+    regla_iva = np.where(cruzo_cpa, poriva_edi, iva_t007s)
+    regla_ieps = np.where(cruzo_cpa, prieps_edi, ieps_t007s)
+
+    if respetar_auditadas:
+        # El archivo viene de manos del auditor: su criterio manda sobre la regla.
+        df["cto_aud"] = _valor_del_auditor(df, "cto_aud", regla_cto).round(4)
+        df["iva_aud"] = _valor_del_auditor(df, "iva_aud", regla_iva).round(6)
+        df["ieps_aud"] = _valor_del_auditor(df, "ieps_aud", regla_ieps).round(6)
+    else:
+        df["cto_aud"] = regla_cto.round(4)
+        df["iva_aud"] = regla_iva.round(6)
+        df["ieps_aud"] = regla_ieps.round(6)
     df["imp_aud"] = (
         to_number(df["cto_aud"])
         * can_rec

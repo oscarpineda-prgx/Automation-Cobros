@@ -473,6 +473,61 @@ def campo(
     return entrada
 
 
+#: Glifo del "ojo" para revelar una contraseña. Se queda en el plano básico (BMP) a
+#: propósito: Tk en Windows no dibuja de forma fiable los caracteres por encima de U+FFFF,
+#: y el emoji de ojo (U+1F441) es uno de ellos. Todo el resto de la interfaz usa BMP igual
+#: (`✓`, `▶`, `⏳`, `⊘`).
+OJO = "◉"
+
+
+def campo_secreto(
+    parent: ctk.CTkFrame,
+    tema: Tema,
+    *,
+    etiqueta: str,
+    variable: ctk.StringVar,
+    ancho: int = 200,
+    oculto: str = "*",
+) -> tuple[ctk.CTkEntry, ctk.CTkLabel]:
+    """Campo de contraseña con un ojo que la revela **mientras se mantiene pulsado**.
+
+    Se revela al presionar y se vuelve a ocultar al soltar: **no es un interruptor**. Esa es
+    la diferencia importante y es deliberada — un interruptor deja la contraseña a la vista
+    hasta que alguien se acuerde de apagarlo, y aquí la cuenta de CPA Vision es compartida y
+    la pantalla se comparte en reuniones. Manteniéndolo pulsado, el descuido es imposible.
+
+    También se oculta si el puntero **sale** del ojo sin soltar, para que arrastrar fuera no
+    deje el campo destapado.
+
+    Es una etiqueta y no un `CTkButton` por el presupuesto de recursos del módulo: cada
+    control con esquinas redondeadas es un `CTkCanvas` más, y esto corre en equipos de un
+    solo núcleo. Una etiqueta con el cursor de mano se ve igual y no cuesta canvas.
+    """
+    entrada = campo(parent, tema, etiqueta=etiqueta, variable=variable, ancho=ancho, show=oculto)
+    ojo = ctk.CTkLabel(
+        parent,
+        text=OJO,
+        width=24,
+        font=ctk.CTkFont(FUENTE, 13),
+        text_color=tema("t2"),
+        cursor="hand2",
+    )
+    ojo.pack(side="left", padx=(6, 0), pady=12)
+
+    def mostrar(_evento=None) -> None:
+        entrada.configure(show="")
+        ojo.configure(text_color=tema("accent"))
+
+    def ocultar(_evento=None) -> None:
+        entrada.configure(show=oculto)
+        ojo.configure(text_color=tema("t2"))
+
+    ojo.bind("<ButtonPress-1>", mostrar)
+    ojo.bind("<ButtonRelease-1>", ocultar)
+    ojo.bind("<Leave>", ocultar)
+    return entrada, ojo
+
+
 def opciones(
     parent: ctk.CTkFrame,
     tema: Tema,

@@ -1,6 +1,6 @@
 # Interfaz gráfica — PRGX Soriana Audit Suite
 
-> **Última actualización:** 2026-08-24
+> **Última actualización:** 2026-09-10
 > **Archivos:** [`automation_costos/ui.py`](../automation_costos/ui.py) (presentación) ·
 > [`automation_costos/app.py`](../automation_costos/app.py) (aplicación)
 
@@ -110,6 +110,27 @@ le hace falta a la vista — donde están los botones.
 | Proveedor · Desde · Hasta | Vista **Un proveedor** | Solo esa vista trabaja sobre un proveedor concreto; en «Por lotes» cada renglón trae el suyo |
 | Carpeta de **Salida** | Vista **Ajustes** | Sí es compartida —las dos vistas generan entregables—, así que va con las demás carpetas. Las otras dos vistas la **anuncian** en letra chica |
 | Credenciales, Parquet, Descargas, RFC | Vista **Ajustes** | Se tocan una vez |
+
+### La contraseña se ve manteniendo pulsado el ojo (2026-09-10)
+
+`ui.campo_secreto()` añade junto al campo un ojo (`◉`) que **revela el texto mientras se
+mantiene pulsado** y lo vuelve a ocultar al soltar. Una credencial mal tecleada solo se
+descubre cuando el lote falla contra el portal, minutos después.
+
+Es un gesto sostenido y **no un interruptor**, a propósito: un interruptor deja la contraseña
+a la vista hasta que alguien se acuerde de apagarlo, y aquí la cuenta de CPA Vision es
+**compartida** y la pantalla se comparte en reuniones. También se oculta si el puntero **sale**
+del ojo sin soltar.
+
+Dos detalles que responden a restricciones del módulo y conviene no deshacer:
+
+- **Es una `CTkLabel`, no un `CTkButton`.** Cada control con esquinas redondeadas es un
+  `CTkCanvas` más (ver §3). Una etiqueta con cursor de mano se ve igual y no cuesta canvas.
+- **El glifo es `◉` (U+25C9), no el emoji de ojo (U+1F441).** Tk en Windows no dibuja de
+  forma fiable lo que pasa de U+FFFF. Toda la interfaz se mantiene dentro del BMP.
+
+> Al probar esto con `event_generate`: los eventos **no** llegan a widgets sin mapear, y
+> `CTkLabel.bind()` reenvía a su canvas y su label internos, no al frame exterior.
 
 ## 5a. Vista «Un proveedor» — la lista de pasos
 
@@ -276,11 +297,106 @@ Decisiones que conviene no deshacer:
   promedio no promedia — un gigante solo ya se lleva horas. Un estimado que puede errar por
   un factor de diez es peor que no dar ninguno.
 
-### Límite conocido
+### Cómo funciona la fase de salida dentro del `.exe`
 
-La fase de salida lanza `main.py` como **subproceso** con el intérprete del `.venv`. Bajo el
-`.exe` empaquetado ese intérprete no existe: `ejecutor.ejecutar` lo comprueba de entrada y
-aborta con un mensaje claro, en vez de dejar N fallos enterrados en N logs.
+La fase de salida corre cada proveedor en **su propio subproceso**. Eso no es un capricho:
+es lo que libera la memoria entre uno y otro y lo que evita que un fallo arrastre al resto —
+es lo que permitió sacar Arca (11.5M renglones) y Pepsico (10.1M).
+
+Dentro del `.exe` no hay `python.exe` ni `main.py`: los dos viven en el repositorio. La
+solución es que **el ejecutable se auto-invoque**, porque su punto de entrada *es* `main.py`,
+que ya despacha subcomandos:
+
+```
+sin empaquetar :  .venv/Scripts/python.exe  main.py  cpa-salida --vendor ...
+empaquetado    :  AutomationCostos.exe               cpa-salida --vendor ...
+```
+
+Las dos ejecutan el mismo código. Lo decide `ejecutor.lanzador()` mirando `sys.frozen`.
+
+| Pieza | Por qué existe |
+|---|---|
+| `ejecutor.CONGELADO` | `sys.frozen`: ¿corremos dentro del `.exe`? |
+| `ejecutor.lanzador()` | `[sys.executable]` empaquetado · `[python, "main.py"]` si no |
+| `ejecutor.directorio_trabajo()` | Empaquetado, `RAIZ` cae dentro de `_internal` y no sirve de `cwd`; se usa la carpeta del ejecutable |
+| `main._asegurar_salida_estandar()` | Ver abajo |
+
+> ⚠️ **Los flujos estándar del hijo hay que arreglarlos a mano.** El log del subproceso es lo
+> único que queda cuando un proveedor falla de madrugada, y tenía tres problemas — los tres
+> vistos sobre el `.exe` compilado, no en teoría. Los corrige
+> `main._asegurar_salida_estandar()`, que se llama al arrancar cuando `sys.frozen`:
+>
+> | Problema | Consecuencia |
+> |---|---|
+> | `console=False` puede dejar `sys.stdout` en `None` | El primer `print()` revienta con `AttributeError` y el proveedor se marca fallido **sin decir por qué** |
+> | El hijo escribe en cp1252 y el log se lee como UTF-8 | Cada acento sale como `?`, y los mensajes son en español |
+> | `stdout` redirigido usa buffer de bloque | Se vacía al terminar, **después** del traceback de `stderr`: el log queda al revés |
+
+> 🛑 **Y el más grave: un subcomando NUNCA debe dejar escapar una excepción.**
+> Sin consola, el bootloader de PyInstaller atiende cualquier excepción no atrapada abriendo
+> un **cuadro de diálogo modal**. En un doble clic eso es útil; como subproceso de la cola es
+> un desastre: el hijo **se queda esperando un clic que nadie va a dar** y una tanda nocturna
+> se cuelga entera en el primer proveedor que falle — justo el escenario para el que existe
+> la cola.
+>
+> Por eso `main()` está partido en dos: `main()` parsea y abre la interfaz, y
+> `_despachar(args)` corre el subcomando dentro de un `try/except` que escribe el traceback
+> en `stderr` (o sea, en el log del proveedor) y sale con `SystemExit(1)`, que es lo que
+> `ejecutor.ejecutar` ya sabe interpretar. **No** se tocó `disable_windowed_traceback`: el
+> diálogo se conserva para el arranque de la interfaz, donde sí sirve.
+>
+> Verificado sobre el `.exe` compilado: termina solo en 10 s (antes se colgaba), código 1, y
+> el log sale en orden y con los acentos intactos.
+
+## 5d. La Validación y el reporte de control (paso 5) — 2026-09-10
+
+El paso **5 · "Generar Validación de Condiciones"** escribe el entregable **en la carpeta del
+proveedor**, no suelto:
+
+```
+<carpeta de salida>/
+  741_SELECTA DEL CAMPO SA DE CV/
+    Validacion_741_SELECTA DEL CAMPO SA DE CV.xlsx
+```
+
+Esa es la misma ruta que produce `cpa-salida`, y es **la única forma que el reporte de
+control reconoce**. Por eso ahora una corrección hecha desde la interfaz sí llega al
+`Reporte_Diferencias_Consolidado.xlsx` de Héctor y queda anotada en
+`Historico_Diferencias.parquet`.
+
+> Antes se escribía `<stem>_Validacion_Condiciones.xlsx` en la raíz de la carpeta de salida.
+> El enganche `reporte_diferencias.actualizar_desde_validacion` **ya existía** —su docstring
+> menciona el botón de la GUI— pero exige la forma canónica, así que con aquel nombre no
+> podía engancharse nunca. No era una decisión de diseño, era un desajuste de rutas.
+
+**De dónde sale el nombre del proveedor.** `app.base_de_compras()` recorre al revés la
+convención de `pipeline._nombre_base`: quita el prefijo `Compras_` y los sufijos que la
+propia interfaz encadena (`_EDI`, `_Recalculado`, en cualquier orden y repetidos). Así
+`Compras_741_SELECTA_EDI_Recalculado.xlsx` sigue apuntando a `741_SELECTA`.
+
+Decisiones que conviene no deshacer:
+
+- **Un Compras con sufijo de año o trimestre no es canónico.** `Compras_391250_ARCA_2020-T3`
+  es **un trozo** de un proveedor grande. Su Validación describiría una parte del periodo, y
+  escribirla encima del entregable completo es un error que **no se nota**. Esos casos caen
+  al comportamiento suelto de siempre.
+- **Sobrescribir un entregable existente pide confirmación.** Es el archivo que ya se le pudo
+  haber mandado al proveedor. El diálogo dice qué se reemplaza y que el reporte se va a
+  actualizar; si el auditor dice que no, no se escribe nada.
+- **Si el Compras ya vive en la carpeta de su proveedor, esa manda** sobre la carpeta de
+  Ajustes: el auditor pudo abrirlo desde otra raíz de entregables.
+- **Cuando no se puede deducir el proveedor no se toca el reporte**, y se dice en la bitácora.
+  Es preferible no actualizar a actualizar con un número parcial.
+- **El reporte nunca tumba el paso.** Se importa dentro de la función (pandas no se paga en
+  el arranque, que corre en equipos de un núcleo) y cualquier fallo se reporta y se sigue: la
+  Validación ya está en disco, y el reporte se regenera solo en la siguiente corrida o a mano
+  con `scripts/reporte_diferencias.py`.
+
+> **Proveedores gigantes.** No hay forma de subir varios Compras y regenerar solo esos: se
+> evaluó y **se descartó por corrección**, no por costo — las devoluciones MR8M/KG-14
+> reparten en cascada sobre el Consolidado completo, así que un recálculo parcial daría
+> cifras distintas según qué archivos se subieran. Ver la entrada del 2026-09-10 en
+> [BITACORA.md](BITACORA.md).
 
 ## 6. Concurrencia
 
@@ -317,7 +433,18 @@ python scripts/build_release.py                 # compila y empaqueta
 python scripts/build_release.py --sin-compilar  # solo re-empaqueta dist/
 ```
 
-Produce `dist/AutomationCostos.exe` y `dist/AutomationCostos_<version>_<fecha>.zip`.
+Produce la carpeta `dist/AutomationCostos/` (con `AutomationCostos.exe` y `_internal/`) y
+`dist/AutomationCostos_<version>_<fecha>.zip`.
+
+> El `.exe` **no arranca solo**: necesita `_internal` al lado, por eso el `.zip` lleva la
+> carpeta completa. Es modo *onedir* a propósito (ver el comentario en el `.spec`).
+
+**Un mismo ejecutable, dos comportamientos**, y de eso depende la cola por lotes:
+
+```bash
+AutomationCostos.exe                      # sin subcomando -> abre la interfaz
+AutomationCostos.exe cpa-salida --vendor 15461 ...   # con subcomando -> corre el CLI
+```
 
 El `.spec` se actualizó para incluir lo que PyInstaller no detecta solo:
 
@@ -329,6 +456,33 @@ El `.spec` se actualizó para incluir lo que PyInstaller no detecta solo:
 
 ## 9. Pendiente
 
-- [ ] **Compilar y probar el `.exe` en una máquina limpia.** El script está escrito pero
-      no se ha ejecutado un build completo.
-- [ ] Valorar un botón de "Detener" como el de Panoptic (hoy no hay cancelación).
+- [ ] **Recompilar el `.exe`**: no tiene ninguno de los cambios del 2026-09-10.
+- [ ] Probar el `.exe` en una **máquina limpia** (los builds ya se compilan y verifican, pero
+      siempre en el equipo de desarrollo).
+
+> ✅ **La descarga sin ventana funciona** (confirmado contra el portal el 2026-09-10). Eran
+> dos cosas y las dos hacían falta: el 403 por el User-Agent y la espera al formulario.
+
+> ✅ **El 403 sin ventana (2026-09-10).** El portal respondía `403 Forbidden` a un navegador
+> sin ventana: no era que el formulario tardara, es que **no había página**. El único factor
+> es la **cadena del User-Agent** (`HeadlessChrome/…`); ocultar `navigator.webdriver` no
+> cambia nada y por eso no se agregó. Sin ventana se usa ahora el UA del navegador con
+> ventana, **leído del propio navegador** para que no envejezca con cada versión de Edge.
+> Con ventana no se tocó nada. Lo construye `cpa_vision._nuevo_contexto()`, que además
+> unificó los cinco sitios donde el contexto se creaba duplicado.
+>
+> ⚠️ Y hace falta **también** la espera al formulario: medido, justo después del
+> `domcontentloaded` hay **0 campos visibles incluso con ventana**.
+
+> ✅ **Credenciales rechazadas: se avisa al instante.** Antes solo se esperaba el éxito, así
+> que una contraseña mal escrita costaba 2 min y salía como `Locator.wait_for: Timeout`. Ahora
+> `_esperar_resultado_login()` vigila los dos desenlaces y, si el portal pinta su recuadro de
+> error, lanza `CredencialesInvalidas` con el mensaje del portal — en 0.22 s.
+>
+> **No se reintenta**, y eso es lo importante: la cuenta de CPA Vision es **compartida**, y un
+> lote de 50 proveedores con dos intentos cada uno son 100 accesos fallidos seguidos, que es
+> como se bloquea la cuenta para todo el equipo. Se corta el lote entero, porque todos los
+> proveedores usan las mismas credenciales.
+
+> ✅ El botón **Detener** ya existe (cancelación cooperativa, 2026-08-25): corta entre paso y
+> paso, nunca a media escritura de un Excel ni a media descarga.

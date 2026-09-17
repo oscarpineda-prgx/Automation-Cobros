@@ -50,5 +50,12 @@ def _hojas_de_compras(path: Path) -> list[str]:
 
 def recalculate_compras_file(input_path: Path, output_path: Path) -> Path:
     df = read_compras_workbook(input_path)
-    recalculated = prepare_compras_dataframe(df)
-    return write_compras_workbook(recalculated, output_path)
+    # El archivo lo acaba de editar el auditor: sus cto_aud/iva_aud/ieps_aud mandan,
+    # y de imp_aud hacia abajo se recalcula a partir de ellos (acuerdo 2026-09-11).
+    recalculated = prepare_compras_dataframe(df, respetar_auditadas=True)
+    # `already_prepared=True` NO es una optimizacion aqui, es lo que hace correcto el paso:
+    # sin ella el exportador vuelve a preparar el DataFrame —esta vez SIN respetar al
+    # auditor— y pisa la correccion que acabamos de conservar. El sintoma seria mudo: el
+    # archivo sale bien formado y con los valores derivados de la regla, como si el auditor
+    # no hubiera escrito nada.
+    return write_compras_workbook(recalculated, output_path, already_prepared=True)

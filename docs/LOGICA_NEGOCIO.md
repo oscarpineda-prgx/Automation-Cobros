@@ -54,6 +54,50 @@ solo gana si es válido (`ctonto_edi > 0`) y menor a `ctouni`; nunca se deja el 
 imp_aud = cto_aud × can_rec × (1 + iva_aud) × (1 + ieps_aud)
 ```
 
+### 3.0 🔑 Qué edita el auditor: las tres columnas auditadas (Mónica, 2026-09-11)
+
+**El auditor NO corrige el bloque EDI.** Esas columnas son **dato de origen**: vienen del
+sistema del cliente y de CPA Vision, el cruce rellena lo que puede y el resto se deja tal
+cual. Lo que el auditor corrige es el **resultado de la auditoría**:
+
+| Columna | Qué es |
+|---|---|
+| **`cto_aud`** | Costo auditado |
+| **`iva_aud`** | Tasa de IVA auditada |
+| **`ieps_aud`** | Tasa de IEPS auditada |
+
+De ahí hacia abajo —**`imp_aud`, `debio_pagar_ne`, `dif_det_ne`, `debio_pagar_inv`,
+`tot_pagado_inv`, `dif_det_inv`**— todo es **resultado calculado**: se recalcula siempre a
+partir de las tres de arriba, así que editarlas a mano no sirve de nada.
+
+#### Cuándo se derivan y cuándo se respetan
+
+`recalculate_dataframe(..., respetar_auditadas=)` gobierna esto:
+
+| Momento | Qué pasa con `cto_aud` / `iva_aud` / `ieps_aud` |
+|---|---|
+| Compras desde SQL (paso 1) · cruce CPA (paso 3) · `cpa-salida` | **Se derivan** del EDI con la regla de §3. No hay criterio humano que preservar |
+| Recálculo del Compras editado (paso 4) · Validación (paso 5) | **Se respeta lo que traiga el archivo**: lo escribió el auditor |
+
+Dos reglas finas, las dos deliberadas:
+
+- **Un `0` escrito a mano se respeta.** La presencia se mide por celda con dato, no por
+  "valor distinto de cero": un `iva_aud = 0` es una corrección legítima (producto exento).
+  Si se midiera por valor, poner 0 equivaldría a no haber escrito nada.
+- **Una celda borrada vuelve a la regla**, no se queda en nulo. Un `NaN` se propagaría a
+  `imp_aud` y de ahí a la diferencia del folio.
+
+#### El código de color del Compras dice qué hacer con cada columna
+
+| Color | Columnas | Significado |
+|---|---|---|
+| 🟩 **Verde oscuro** | el bloque EDI | Dato de origen. **No se edita** |
+| 🟨 **Piel** | `cto_aud`, `iva_aud`, `ieps_aud` | **Lo que edita el auditor** |
+| 🟢 **Verde claro** | `imp_aud` … `dif_det_inv` | Resultado calculado |
+
+> Hasta el 2026-09-11 el piel estaba en el bloque EDI — justo lo que el auditor **no** toca —
+> e invitaba a corregir el dato de origen en vez del criterio de auditoría.
+
 ### 3.1 Por qué la bandera es "cruzó", no "valor ≠ 0"  — reunión 2026-07-31
 
 Acuerdo con **Mónica López** y **Perla Maya**:

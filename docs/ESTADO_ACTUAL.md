@@ -1,9 +1,37 @@
 # Estado actual del proyecto
 
-> **Última actualización:** 2026-08-24
+> **Última actualización:** 2026-09-10
 > Actualizar este archivo al cerrar cada sesión de trabajo.
 
 ---
+
+> ✅ **CERRADO (2026-08-25): el pipeline ya no muere por memoria.** PROPIMEX (77305) falló
+> dos veces —una en el `.exe`, otra en terminal— y las dos causas están corregidas:
+>
+> 1. **La Validación del camino por trimestres se escribía con openpyxl** (todo el libro en
+>    RAM). Ahora usa `write_validation_streaming` (xlsxwriter, `constant_memory`), que ya
+>    existía para los gigantes y estaba hasta importado sin usarse.
+> 2. **Ningún camino por intervalos degradaba la granularidad.** Ahora los tres comparten
+>    `_recorrer_intervalos`: el trimestre que no cabe se reintenta por meses, el mes por
+>    días. Cuánto cabe en RAM depende de la máquina del auditor, así que ya no se adivina
+>    con un umbral fijo.
+>
+> El reintento es **idempotente**: los acumuladores por folio se reasignan solo cuando están
+> completos y cada llamador retira lo que el intento fallido dejó a medias. Sin eso, un
+> reintento habría contado importes dos veces — un fallo peor que el MemoryError porque no
+> se nota. Verificado con Selecta 741 2024 saboteando ambas pasadas: `folio_global` e
+> `inv_global` idénticos tabla contra tabla (1,846 folios, $125,314,295.78).
+>
+> **El `.exe` ya está recompilado** (`dist/AutomationCostos_1.0_20260825.zip`, 119 MB) y
+> verificado: se inspeccionó el PYZ del binario y lleva los símbolos nuevos.
+>
+> **77305 PROPIMEX entregado**: 5 Compras + Validación ($2,963,144.04 · 11,716 folios en el
+> Consolidado, 23,363 en Ajustes) + soportes. Con eso las **74 carpetas** de la carpeta de
+> entregables están completas.
+>
+> ⚠️ **Pendiente de revisar con Mónica/Luis:** de los 29,133 folios con diferencia de
+> PROPIMEX, las devoluciones MR8M/KG-14 anularon ~17,400 (quedaron en la hoja *Ajustes*).
+> Es la proporción más alta vista hasta ahora; conviene confirmar que es correcta.
 
 > ✅ **CERRADO (2026-08-15): el objetivo de cobertura <90 % de Mónica está descargado.**
 > **397 de 398** pares proveedor-año. El único que falta es imposible por CPA Vision
@@ -100,9 +128,12 @@ en blanco porque esos proveedores todavía no se descargan.
 > a 2.7 GB por trimestre) — verificado que **no cambia ningún resultado**. Cada gigante en
 > su **proceso propio**. El Detalle se parte en varias hojas (Arca 4.29M, Pepsico 1.92M).
 
-### Generar los Compras de los gigantes (pendiente, 2026-07-28)
+### Generar los Compras de los gigantes (✅ hecho — verificado en disco el 2026-08-25)
 
-La Validación de Arca/Pepsico ya está. Faltan sus **archivos de Compras** (referencia). Se
+> Ya no está pendiente: Arca tiene sus **24** Compras y Pepsico sus **32**. Lo de abajo se
+> conserva como referencia de cómo se generan.
+
+La Validación de Arca/Pepsico ya está. Faltaban sus **archivos de Compras** (referencia). Se
 generan aparte, por trimestre, con el subcomando `cpa-compras-grande` — **resumible** (salta
 los trimestres cuyo archivo ya existe, sin re-consultar SQL). No escribe Validación, así que
 no acumula en RAM: pico ~5.5 GB por trimestre. Un trimestre tarda ~5 min (16 trimestres ≈ 1.5 h).
@@ -196,10 +227,12 @@ quieren los Compras por trimestre de Arca/Pepsico.
 
 ## Dos caminos según el tamaño (2026-07-27)
 
-`generar_salida_proveedor` hace un `COUNT` barato y elige:
-- **≤ 2.5M renglones:** camino normal, todo en memoria (rápido). Ej. Selecta, Celaya, Nestlé.
+`generar_salida_proveedor` hace un `COUNT` barato y elige (umbral bajado a **1M** el
+2026-08-25; ver la bitácora de ese día):
+- **≤ 1M renglones:** camino normal, todo en memoria (rápido). Ej. Selecta.
   → un `Compras_<base>.xlsx` (o por año si es grande) + Validación.
-- **> 2.5M:** **procesamiento por trimestre** ([pipeline_streaming.py](../automation_costos/pipeline_streaming.py)),
+  Si aun así se queda sin RAM, **reintenta solo** por el camino de trimestres.
+- **> 1M:** **procesamiento por trimestre** ([pipeline_streaming.py](../automation_costos/pipeline_streaming.py)),
   para no agotar la RAM (un año no cabe: 1.6M compras + 2.9M CPA). Ej. Arca (11.5M), Pepsico
   (10.1M). → un `Compras_<base>_<año>-T<n>.xlsx` **por trimestre** (~24) + **una** Validación
   consolidada. Da resultados **idénticos** al camino normal (verificado con Selecta y Nestlé).
@@ -366,8 +399,72 @@ lógica está probada aislada; lo que falta es la corrida de verdad.
 con RFC inventado, `BIM000101AAA`) que escribió una prueba del 2026-08-24 antes de arreglar
 la ruta de persistencia. **Vaciar la cola desde la GUI (botón Limpiar) antes de usarla.**
 
+## El .exe ya genera entregables por lotes (2026-08-24)
+
+Hasta hoy, desde el ejecutable la cola **solo podía descargar**: la fase de generación lanza
+subprocesos con el `python.exe` del `.venv`, que no existe dentro del paquete. Resuelto
+haciendo que **el ejecutable se auto-invoque** (`AutomationCostos.exe cpa-salida ...`), ya que
+su punto de entrada es `main.py` y este ya despachaba subcomandos. Detalle en
+[GUI.md §5c](GUI.md).
+
+Build del 2026-08-24 compilado y verificado: despacha subcomandos sin abrir la interfaz y
+escribe en el log redirigido. **Falta probarlo de punta a punta**: una cola real con SQL y
+portal, y abrir el `.exe` en una máquina limpia.
+
+⚠️ `dist/` acumula un `.zip` por build (119 MB cada uno) y `X:` está al 100 %. Conviene
+borrar los viejos.
+
+## Lo que se movió el 2026-09-10
+
+**1. La Validación generada desde la GUI ya actualiza el reporte de control.** Era un
+desajuste de rutas, no una decisión: el enganche existía pero la interfaz escribía el archivo
+suelto y con otro nombre. Ahora el paso 5 escribe en `<salida>/<num>_<nombre>/Validacion_...`
+—la misma ruta de `cpa-salida`— y de ahí el reporte y el histórico se actualizan solos. Pide
+confirmación antes de reemplazar un entregable existente, y **no** trata como canónico un
+Compras de un solo año o trimestre. Ver [GUI.md §5d](GUI.md).
+
+**2. ✅ La descarga sin ventana: FUNCIONANDO** (confirmado por Óscar el 2026-09-10 contra el
+portal real). Eran dos cosas, y las dos hacían falta. **Era el User-Agent.** El portal respondía
+**403 Forbidden** a un navegador sin ventana, así que no había página y por eso no había
+ningún campo. Medido contra `cpavision.mx` sin credenciales:
+
+| Variante | HTTP | Título |
+|---|---|---|
+| Sin ventana, UA por omisión (`HeadlessChrome/152`) | **403** | `403 Forbidden` |
+| Sin ventana, UA sin la marca `Headless` | **200** | `Login Cpa Vision` |
+| Con ventana (control) | 200 | `Login Cpa Vision` |
+
+El filtro mira **la cadena del UA**, no `navigator.webdriver` (probado: ocultarlo no cambia
+nada, así que no se agregó). Ahora sin ventana se usa el UA del navegador con ventana,
+leído del propio navegador para que no envejezca con cada versión de Edge. **Con ventana no
+se tocó nada.** Explica por qué las 212 h de histórico nunca lo vieron: todas con ventana.
+
+Los **dos** arreglos de la sesión eran necesarios: justo después del `domcontentloaded` hay
+**0 campos visibles incluso con ventana**, así que sin la espera al formulario el login
+seguiría siendo una carrera. Verificado contra el portal real: sin ventana, HTTP 200 y 4
+campos tras la espera.
+
+**3. Corrección de gigantes por multiselección: descartada.** Por corrección, no por costo —
+las devoluciones MR8M/KG-14 reparten en cascada sobre el Consolidado completo. Decisión de
+Óscar; el rescate de un gigante se hace con un script desde SQL, como se hizo Arca.
+
 ## Siguiente paso inmediato
 
+- [x] ~~Recompilar el `.exe`~~ — el bueno es **`AutomationCostos_1.0_20260911.zip`**
+      (121 MB, 2,509 archivos).
+
+      > ⚠️ **El `_20260910.zip` está ROTO: no repartirlo.** No abre la interfaz —
+      > PyInstaller dejó fuera las extensiones C de Pillow. Ver la entrada del 2026-09-11 en
+      > [BITACORA.md](BITACORA.md). Sigue en `dist/` a la espera de que Óscar decida
+      > borrarlo.
+
+- [ ] **Probar el `.exe` del 11-sep en la máquina limpia** (el del 10-sep falló ahí) y correr
+      desde él una **tanda de 3-4 proveedores** de punta a punta. Es lo único que aún no se
+      ha visto correr completo con todos los cambios juntos
+- [ ] Decidir si el `.zip` debe llevar las guías del auditor
+      (`Guia_Validacion_Condiciones.docx`, `Guia_Columnas_Compras.docx`) y el nuevo
+      `Manual_Automation_Costos.docx` en vez del `README.md`, que está escrito para
+      desarrollador y confunde al auditor
 - [x] ~~Descargar el objetivo <90 %~~ — **cerrado el 2026-08-15**, 397/398
 - [x] ~~Cola de trabajo de la GUI con columna «Qué hacer»~~ — **cerrado el 2026-08-24**
 - [x] ~~Rediseño de la interfaz por vistas + lista de pasos~~ — **cerrado el 2026-08-24**

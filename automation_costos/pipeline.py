@@ -22,6 +22,7 @@ Cada proveedor se entrega como un paquete autocontenido dentro de `output_dir`:
 
 from __future__ import annotations
 
+import gc
 import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -30,6 +31,7 @@ from typing import Callable
 import pandas as pd
 
 from automation_costos.calculations import prepare_compras_dataframe
+from automation_costos.cancelacion import SenalCancelacion, revisar
 from automation_costos.cruce_cpa import (
     ResultadoCruce,
     cargar_cpa,
@@ -68,7 +70,11 @@ def _cobertura_edi(df) -> float:
 # Arriba de estos renglones el proveedor NO cabe en memoria de una sola vez y se procesa
 # año por año (pipeline_streaming). Debajo se usa el camino normal (todo en memoria), que es
 # más rápido. Celaya (1.24M) y Nestlé (~1.3M) caben; Arca/Pepsico (10-12M) no.
-MAX_FILAS_EN_MEMORIA = 2_500_000
+#
+# 2026-08-25: bajado de 2.5M a 1.0M. PROPIMEX (1.28M) reventó dos veces por MemoryError con
+# el umbral en 2.5M, en un equipo de 24 GB con la interfaz abierta. El camino por trimestres
+# tarda un poco más pero termina; el normal se cae después de 7 minutos de trabajo tirado.
+MAX_FILAS_EN_MEMORIA = 1_000_000
 
 
 @dataclass(slots=True)
@@ -93,12 +99,24 @@ def generar_salida_proveedor(
     usar_cpa: bool = True,
     anios_cruce: set[int] | None = None,
     anios: set[int] | None = None,
+    cancelado: SenalCancelacion | None = None,
+    reanudar: bool = False,
+    por_mes: bool = False,
 ) -> ResultadoPipeline:
     """Genera la salida de un proveedor eligiendo el camino según su tamaño.
 
     Hace un COUNT barato en SQL: si el proveedor cabe en memoria usa el camino normal (todo
     de una vez, más rápido); si no, lo procesa año por año (pipeline_streaming), acotando la
     memoria. El resultado es equivalente; solo cambia cómo se calcula.
+
+    `cancelado` se consulta **entre paso y paso**, nunca a media escritura: abortar mientras
+    se escribe un Excel de millones de renglones dejaría un archivo corrupto que además
+    parece válido. La consecuencia es que "Detener" no es instantáneo — espera a que termine
+    el paso en curso — y eso es deliberado. Por terminal no se pasa y el comportamiento es
+    exactamente el de siempre.
+
+    `reanudar` solo aplica al camino por trimestres: reusa los `Compras_*.xlsx` ya escritos
+    en vez de rehacerlos, para retomar una corrida que murió en la Validación.
     """
     try:
         total = contar_compras(vendor, start_date, end_date)
@@ -107,18 +125,48 @@ def generar_salida_proveedor(
         total = 0
         log(f"[0/4] No se pudo contar de antemano ({exc}); se intenta el camino normal.")
 
-    if total > MAX_FILAS_EN_MEMORIA:
-        log(f"      Proveedor grande (> {MAX_FILAS_EN_MEMORIA:,}): se procesa por trimestres.")
+    def por_trimestres() -> ResultadoPipeline:
         from automation_costos.pipeline_streaming import generar_salida_proveedor_por_anios
 
-        resultado = generar_salida_proveedor_por_anios(
-            vendor, start_date, end_date, parquet_root, output_dir, log=log, usar_cpa=usar_cpa
-        )
-    else:
-        resultado = _generar_salida_en_memoria(
+        return generar_salida_proveedor_por_anios(
             vendor, start_date, end_date, parquet_root, output_dir, log=log,
-            usar_cpa=usar_cpa, anios_cruce=anios_cruce, anios=anios,
+            usar_cpa=usar_cpa, cancelado=cancelado, reanudar=reanudar, por_mes=por_mes,
         )
+
+    if total > MAX_FILAS_EN_MEMORIA:
+        log(f"      Proveedor grande (> {MAX_FILAS_EN_MEMORIA:,}): se procesa por trimestres.")
+        resultado = por_trimestres()
+    else:
+        sin_memoria = False
+        try:
+            resultado = _generar_salida_en_memoria(
+                vendor, start_date, end_date, parquet_root, output_dir, log=log,
+                usar_cpa=usar_cpa, anios_cruce=anios_cruce, anios=anios, cancelado=cancelado,
+            )
+        except MemoryError:
+            # `MAX_FILAS_EN_MEMORIA` es un numero fijo, y si cabe o no depende de la RAM
+            # LIBRE, no del conteo: la misma maquina con la interfaz abierta tiene la mitad.
+            # Paso con PROPIMEX (1.28M renglones, por debajo del umbral) en un equipo de
+            # 24 GB con 11.6 libres, tras 6.7 min de trabajo tirado. En vez de subir o bajar
+            # el umbral a ojo —y de fallar mas seguido en los equipos de los auditores, que
+            # tienen menos memoria— se reintenta por el camino que no carga todo de una vez.
+            # El resultado es equivalente; solo cambia como se calcula.
+            #
+            # El reintento NO puede ir aquí dentro: mientras se ejecuta el `except`, la
+            # excepción viva mantiene su traceback, y el traceback mantiene vivos todos los
+            # frames de `_generar_salida_en_memoria` **con sus locals** — o sea, el DataFrame
+            # de millones de renglones que acaba de reventar la memoria. `gc.collect()` no lo
+            # libera porque sigue referenciado. Por eso el reintento por trimestres moría
+            # también, ya en la primera lectura de SQL. Se marca la bandera, se sale del
+            # handler (ahí muere el traceback y se libera todo) y se reintenta fuera.
+            gc.collect()
+            sin_memoria = True
+
+        if sin_memoria:
+            gc.collect()
+            log("      Sin memoria en el camino normal. Se reintenta por trimestres, "
+                "que no carga el periodo completo de una vez.")
+            resultado = por_trimestres()
     actualizar_reporte_consolidado(output_dir, log=log)
     return resultado
 
@@ -164,10 +212,12 @@ def _generar_salida_en_memoria(
     usar_cpa: bool = True,
     anios_cruce: set[int] | None = None,
     anios: set[int] | None = None,
+    cancelado: SenalCancelacion | None = None,
 ) -> ResultadoPipeline:
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    revisar(cancelado, "antes de consultar SQL")
     log(f"[1/4] Compras de {vendor} ({start_date}..{end_date}) desde SQL Server...")
     raw = fetch_compras(vendor, start_date, end_date)
     if raw.empty:
@@ -197,8 +247,10 @@ def _generar_salida_en_memoria(
         # "Ejecutar", asi que el entregable sale con el EDI que ya trae el Compras. No se
         # mira el Parquet aunque tenga datos de ese RFC: que el resultado dependa de que
         # se alcanzo a descargar haria la corrida irreproducible.
+        revisar(cancelado, "antes del cruce con CPA")
         log("[2/4] Sin cruce con CPA Vision (ejecucion sin CPA, por indicacion del plan).")
     else:
+        revisar(cancelado, "antes del cruce con CPA")
         log("[2/4] Rellenando columnas EDI desde CPA Vision...")
         barcodes = set(raw["codbarra"].map(solo_digitos)) - {""}
         cpa = cargar_cpa(rfc, parquet_root, barcodes=barcodes)
@@ -273,6 +325,7 @@ def _generar_salida_en_memoria(
     # El periodo sale de los renglones que quedaron, no del rango pedido a SQL: asi el
     # titulo del entregable dice exactamente que años contiene.
     periodo = formatear_periodo(anios_de_compras(prepared))
+    revisar(cancelado, "antes de escribir la Validación")
     log(f"[3/4] Generando la Validación de Condiciones (periodo {periodo})...")
     write_validation_from_dataframe(prepared, validacion_path, periodo=periodo)
     log(f"      {validacion_path}")
@@ -295,6 +348,7 @@ def _generar_salida_en_memoria(
             log=log,
         )
 
+    revisar(cancelado, "antes de escribir el Compras")
     log("[4/4] Generando el Compras (esto puede tardar en proveedores grandes)...")
     compras_paths = write_compras_files(
         prepared, proveedor_dir, base, vendor=vendor,
